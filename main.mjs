@@ -1162,6 +1162,9 @@ ipcMain.handle("read-file", async (_evt, absPath) => {
     readFileCacheSet(absPath, data);
     return data;
   } catch (e) {
+    const code = (e && typeof e === 'object' && 'code' in e) ? String(e.code) : '';
+    if (code === 'ENOENT') return null;
+
     // Propagate rich error to renderer (ipcRenderer.invoke will reject), so the UI shows the real reason.
     const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
     const stderr = (e && typeof e === 'object' && 'stderr' in e && e.stderr) ? String(e.stderr) : '';

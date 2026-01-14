@@ -10,6 +10,7 @@ const btnJump = document.getElementById('btnJump') as HTMLButtonElement;
 const inpLimit = document.getElementById('inpLimit') as HTMLInputElement;
 const selAnim = document.getElementById('selAnim') as HTMLSelectElement;
 const chkLoop = document.getElementById('chkLoop') as HTMLInputElement;
+const btnCache = document.getElementById('btnCache') as HTMLButtonElement;
 const togRotate = document.getElementById('togRotate') as HTMLInputElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const war3StatusEl = document.getElementById('war3Status') as HTMLSpanElement;
@@ -223,6 +224,22 @@ selAnim.addEventListener('change', () => {
 });
 chkLoop.addEventListener('change', () => {
   settings.loop = chkLoop.checked;
+});
+btnCache?.addEventListener('click', async () => {
+  if (!btnCache) return;
+  const prevText = btnCache.textContent;
+  btnCache.disabled = true;
+  btnCache.textContent = '缓存中... 0/0';
+  try {
+    await viewer.cacheAllModels((done, total) => {
+      btnCache.textContent = `缓存中... ${done}/${total}`;
+    });
+  } catch (e) {
+    console.error(e);
+  } finally {
+    btnCache.disabled = false;
+    btnCache.textContent = prevText || '一键缓存';
+  }
 });
 togRotate.addEventListener('change', () => {/*no tile rebuild needed*/});
 

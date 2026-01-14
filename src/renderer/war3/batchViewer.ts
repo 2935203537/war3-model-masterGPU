@@ -10,6 +10,16 @@ function fallbackMipmaps(): any[] {
   return [typeof ImageData !== 'undefined' ? new ImageData(data, 1, 1) : { width: 1, height: 1, data, colorSpace: 'srgb' }];
 }
 
+const modelCache = new Map<string, Model>();
+
+function getCachedModel(modelAbs: string): Model | null {
+  return modelCache.get(modelAbs) || null;
+}
+
+function setCachedModel(modelAbs: string, model: Model): void {
+  modelCache.set(modelAbs, model);
+}
+
 function findSequenceIndexByName(model: Model | null, animName: string): number {
   if (!model?.Sequences?.length) return 0;
   const name = (animName || '').toLowerCase().trim();
@@ -189,6 +199,16 @@ class ModelTile {
   private cameraDistance = 600;
   private center = vec3.create();
 
+  public destroy(): void {
+    if (this.renderer) {
+      try { this.renderer.destroy(); } catch {}
+    }
+    this.renderer = null;
+    this.model = null;
+    this.loaded = false;
+    this.loading = false;
+  }
+
   constructor(
     public readonly modelAbs: string,
     private readonly idx: FileIndex,
@@ -233,15 +253,18 @@ class ModelTile {
     if (this.loaded || this.loading) return;
     this.loading = true;
     try {
-      const bytes = await this.readFile(this.modelAbs);
-      const lower = this.modelAbs.toLowerCase();
-      let model: Model;
-      const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      if (lower.endsWith('.mdx') || isMDXBytes(bytes)) {
-        model = parseMDX(array);
-      } else {
-        const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-        model = parseMDL(text);
+      let model = getCachedModel(this.modelAbs);
+      if (!model) {
+        const bytes = await this.readFile(this.modelAbs);
+        const lower = this.modelAbs.toLowerCase();
+        const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        if (lower.endsWith('.mdx') || isMDXBytes(bytes)) {
+          model = parseMDX(array);
+        } else {
+          const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          model = parseMDL(text);
+        }
+        setCachedModel(this.modelAbs, model);
       }
       ensureModelHasSequence(model);
       this.model = model;
@@ -989,6 +1012,7 @@ export class BatchViewer {
   private gpu: GPUShared | null = null;
 
   private tiles: ModelTile[] = [];
+  private tilePool = new Map<string, ModelTile>();
   private tileMap = new Map<HTMLDivElement, ModelTile>();
   private observer: IntersectionObserver;
   private loadingQueue: ModelTile[] = [];
@@ -1000,6 +1024,38 @@ export class BatchViewer {
   private lastPages = 1;
   private lastPage = 0;
   private lastPageSize = 1;
+
+  private readonly tilePoolMax = 200;
+
+  private tilePoolGet(modelAbs: string): ModelTile | null {
+    const t = this.tilePool.get(modelAbs) || null;
+    if (!t) return null;
+    this.tilePool.delete(modelAbs);
+    this.tilePool.set(modelAbs, t);
+    return t;
+  }
+
+  private tilePoolSet(modelAbs: string, tile: ModelTile): void {
+    this.tilePool.delete(modelAbs);
+    this.tilePool.set(modelAbs, tile);
+  }
+
+  private tilePoolEvict(keepAbs: Set<string>): void {
+    while (this.tilePool.size > this.tilePoolMax) {
+      const oldestKey = this.tilePool.keys().next().value as string | undefined;
+      if (!oldestKey) return;
+      if (keepAbs.has(oldestKey)) {
+        const t = this.tilePool.get(oldestKey);
+        if (!t) return;
+        this.tilePool.delete(oldestKey);
+        this.tilePool.set(oldestKey, t);
+        continue;
+      }
+      const oldTile = this.tilePool.get(oldestKey);
+      this.tilePool.delete(oldestKey);
+      try { oldTile?.destroy(); } catch {}
+    }
+  }
 
   constructor(
     private readonly grid: HTMLElement,
@@ -1065,6 +1121,7 @@ export class BatchViewer {
     }
 
     this.idx = this.buildIndex(folder);
+    this.tilePool.clear();
     this.renderTiles();
   }
 
@@ -1090,6 +1147,54 @@ export class BatchViewer {
 
   public getFilteredModelRels(): string[] {
     return this.lastFiltered.slice();
+  }
+
+  public async cacheAllModels(onProgress?: (done: number, total: number) => void): Promise<boolean> {
+    if (!this.folder || !this.idx || !this.gpu) return false;
+
+    const s = this.getSettings();
+    const models = this.folder.models.slice().sort();
+    const total = models.length;
+    let done = 0;
+    const maxConcurrency = 1;
+    const pending = models.slice();
+
+    this.status(`缓存中... 0/${total}`);
+    onProgress?.(0, total);
+
+    const work = async () => {
+      while (pending.length) {
+        const rel = pending.shift();
+        if (!rel) continue;
+        const modelAbs = this.resolveModelAbs(rel);
+        if (!modelAbs) {
+          done++;
+          continue;
+        }
+
+        const tile = new ModelTile(modelAbs, this.idx!, this.gpu!, this.readFile, this.getSettings);
+        tile.setSize(s.tileSize);
+
+        try {
+          await tile.load();
+        } catch {
+        } finally {
+          try { tile.destroy(); } catch {}
+          done++;
+          this.status(`缓存中... ${done}/${total}`);
+          onProgress?.(done, total);
+          if (done % 5 === 0) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(maxConcurrency, total) }, () => work());
+    await Promise.all(workers);
+    this.status(`缓存完成: ${done}/${total}`);
+    onProgress?.(done, total);
+    return true;
   }
 
   public resolveModelAbs(rel: string): string | null {
@@ -1182,23 +1287,44 @@ export class BatchViewer {
     this.grid.style.setProperty('--tile', `${s.tileSize}px`);
 
     // Clean old
+    try { this.observer.disconnect(); } catch {}
     this.grid.innerHTML = '';
     this.tiles = [];
     this.tileMap.clear();
     this.loadingQueue = [];
     this.loadingCount = 0;
 
+    // Re-create observer after disconnect to avoid leaking observations
+    this.observer = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const tile = this.tileMap.get(e.target as HTMLDivElement);
+        if (!tile) continue;
+        tile.visible = e.isIntersecting;
+        if (tile.visible) {
+          this.enqueueLoad(tile);
+        }
+      }
+    }, { root: null, threshold: 0.05 });
+
+    const keepAbs = new Set<string>();
     for (const modelRel of list) {
       // 从 idx 中获取绝对路径
-      const modelAbs = idx.byRelLower.get(modelRel.toLowerCase());
+      const modelAbs = this.resolveModelAbs(modelRel);
       if (!modelAbs) continue;
-      const tile = new ModelTile(modelAbs, idx, gpu, this.readFile, this.getSettings);
+      keepAbs.add(modelAbs);
+      let tile = this.tilePoolGet(modelAbs);
+      if (!tile) {
+        tile = new ModelTile(modelAbs, idx, gpu, this.readFile, this.getSettings);
+        this.tilePoolSet(modelAbs, tile);
+      }
       tile.setSize(s.tileSize);
       this.tiles.push(tile);
       this.tileMap.set(tile.el, tile);
       this.grid.appendChild(tile.el);
       this.observer.observe(tile.el);
     }
+
+    this.tilePoolEvict(keepAbs);
 
     this.status(`模型: ${filtered.length}  | 页: ${page + 1}/${pages}  | 显示: ${list.length}`);
   }
