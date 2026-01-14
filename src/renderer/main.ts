@@ -5,6 +5,8 @@ const btnPickMap = document.getElementById('btnPickMap') as HTMLButtonElement;
 const btnPrev = document.getElementById('btnPrev') as HTMLButtonElement;
 const btnNext = document.getElementById('btnNext') as HTMLButtonElement;
 const txtPage = document.getElementById('txtPage') as HTMLSpanElement;
+const inpJump = document.getElementById('inpJump') as HTMLInputElement;
+const btnJump = document.getElementById('btnJump') as HTMLButtonElement;
 const inpLimit = document.getElementById('inpLimit') as HTMLInputElement;
 const togRotate = document.getElementById('togRotate') as HTMLInputElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
@@ -64,9 +66,11 @@ function renderPageInfo() {
   const info = viewer.getRenderInfo();
   if (!info) {
     txtPage.textContent = '0/0';
+    inpJump.value = '1';
     return;
   }
   txtPage.textContent = `${info.page + 1}/${info.pages}`;
+  inpJump.value = String(info.page + 1);
 }
 
 function rebuildFileList() {
@@ -102,6 +106,15 @@ function refreshAll() {
   viewer.refresh();
   renderPageInfo();
   rebuildFileList();
+
+  // UX: when changing page/filter/jump, always show the top-most models.
+  try {
+    const main = document.querySelector('.main') as HTMLElement | null;
+    if (main) main.scrollTop = 0;
+  } catch {}
+  try {
+    fileList.scrollTop = 0;
+  } catch {}
 }
 
 async function refreshWar3Status() {
@@ -184,6 +197,22 @@ btnPrev.addEventListener('click', () => {
   if (cur <= 0) return;
   settings.page = cur - 1;
   refresh();
+});
+
+const applyJump = () => {
+  const info = viewer.getRenderInfo();
+  if (!info) return;
+  const raw = parseInt(inpJump.value, 10);
+  const desired = Number.isFinite(raw) ? raw : 1;
+  const nextPage = Math.max(1, Math.min(info.pages, desired)) - 1;
+  if (nextPage === (settings.page | 0)) return;
+  settings.page = nextPage;
+  refresh();
+};
+
+btnJump.addEventListener('click', applyJump);
+inpJump.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') applyJump();
 });
 
 btnNext.addEventListener('click', () => {

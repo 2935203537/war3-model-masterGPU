@@ -3008,7 +3008,9 @@ export class ModelRenderer {
         noDepthTest: boolean,
         noDepthSet: boolean
     ) : GPURenderPipeline {
-        const [name, blend, baseDepth] = GPU_LAYER_PROPS[filterMode];
+        const safeFilterMode = (typeof filterMode === 'number' && Number.isFinite(filterMode) && filterMode >= 0) ? filterMode : 0;
+        const props = GPU_LAYER_PROPS[safeFilterMode] || GPU_LAYER_PROPS[0];
+        const [name, blend, baseDepth] = props;
         const depth: GPUDepthStencilState = {
             ...baseDepth,
             depthWriteEnabled: noDepthSet ? false : baseDepth.depthWriteEnabled,
@@ -3775,10 +3777,13 @@ export class ModelRenderer {
 
     private getTexCoordMatrix (layer: Layer): mat3 {
         if (typeof layer.TVertexAnimId === 'number') {
-            const anim: TVertexAnim = this.rendererData.model.TextureAnims[layer.TVertexAnimId];
-            const translationRes = this.interp.vec3(translation, anim.Translation);
-            const rotationRes = this.interp.quat(rotation, anim.Rotation);
-            const scalingRes = this.interp.vec3(scaling, anim.Scaling);
+            const anim: TVertexAnim | undefined = this.rendererData.model.TextureAnims?.[layer.TVertexAnimId];
+            if (!anim) {
+                return identifyMat3;
+            }
+            const translationRes = anim.Translation ? this.interp.vec3(translation, anim.Translation) : null;
+            const rotationRes = anim.Rotation ? this.interp.quat(rotation, anim.Rotation) : null;
+            const scalingRes = anim.Scaling ? this.interp.vec3(scaling, anim.Scaling) : null;
             mat4.fromRotationTranslationScale(
                 texCoordMat4,
                 rotationRes || defaultRotation,

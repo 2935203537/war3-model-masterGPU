@@ -228,6 +228,15 @@ body {
   text-align: center;
 }
 
+.pager-input {
+  width: 72px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #111;
+  color: var(--text);
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--tile, 256px));
@@ -243,6 +252,7 @@ body {
   background: #000;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .tile .canvas {
@@ -279,9 +289,17 @@ body {
 }
 
 .tile .hint {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 46px;
   padding: 10px;
   color: var(--muted);
   font-size: 12px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  pointer-events: none;
 }
 
 

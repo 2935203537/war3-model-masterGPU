@@ -29,6 +29,54 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || n;
 }
 
+function ensureModelHasSequence(model: any): void {
+  if (!model) return;
+  if (!Array.isArray(model.Sequences)) {
+    model.Sequences = [];
+  }
+  if (model.Sequences.length === 0) {
+    model.Sequences.push({
+      Name: 'Default',
+      Interval: new Uint32Array([0, 1]),
+      NonLooping: false,
+      MinimumExtent: new Float32Array([0, 0, 0]),
+      MaximumExtent: new Float32Array([0, 0, 0]),
+      BoundsRadius: 0,
+      MoveSpeed: 0,
+      Rarity: 0,
+    });
+    return;
+  }
+
+  const s0 = model.Sequences[0];
+  if (!s0) {
+    model.Sequences[0] = {
+      Name: 'Default',
+      Interval: new Uint32Array([0, 1]),
+      NonLooping: false,
+      MinimumExtent: new Float32Array([0, 0, 0]),
+      MaximumExtent: new Float32Array([0, 0, 0]),
+      BoundsRadius: 0,
+      MoveSpeed: 0,
+      Rarity: 0,
+    };
+    return;
+  }
+
+  const interval = s0.Interval;
+  if (interval instanceof Uint32Array) {
+    if (interval.length < 2) {
+      s0.Interval = new Uint32Array([interval[0] ?? 0, (interval[0] ?? 0) + 1]);
+    }
+  } else if (Array.isArray(interval)) {
+    const a0 = (interval[0] ?? 0) | 0;
+    const a1 = (interval[1] ?? (a0 + 1)) | 0;
+    s0.Interval = new Uint32Array([a0, a1]);
+  } else {
+    s0.Interval = new Uint32Array([0, 1]);
+  }
+}
+
 type FolderData = {
   root: string;
   files: { abs: string; rel: string; ext: string; base: string }[];
@@ -79,7 +127,7 @@ async function initWebGPU(): Promise<GPUShared> {
   if (!navigator.gpu) {
     throw new Error('WebGPU not available. Update Electron/Chrome or enable WebGPU.');
   }
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('Failed to request WebGPU adapter');
   const hasGPUBC = adapter.features.has('texture-compression-bc');
   const device = await adapter.requestDevice({
@@ -159,6 +207,7 @@ class ModelTile {
         const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
         model = parseMDL(text);
       }
+      ensureModelHasSequence(model);
       this.model = model;
       this.badgeEl.textContent = model.Version >= 1100 ? 'HD' : 'SD';
 
@@ -288,16 +337,28 @@ class ModelTile {
     this.renderer.setLightPosition(lightPos);
     this.renderer.setLightColor(vec3.fromValues(1.0, 1.0, 1.0));
 
-    if (s.animate && this.model.Sequences?.length) {
-      this.renderer.update(dt);
-    }
+    try {
+      if (s.animate && this.model.Sequences?.length) {
+        this.renderer.update(dt);
+      }
 
-    this.renderer.render(mvMatrix, pMatrix, {
-      wireframe: false,
-      env: false,
-      useEnvironmentMap: false,
-      levelOfDetail: 0
-    });
+      this.renderer.render(mvMatrix, pMatrix, {
+        wireframe: false,
+        env: false,
+        useEnvironmentMap: false,
+        levelOfDetail: 0
+      });
+    } catch (e) {
+      console.error(e);
+      // Stop repeated crashes for this tile.
+      try { this.renderer.destroy(); } catch {}
+      this.renderer = null;
+      this.loaded = false;
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = `Error: ${String((e as any)?.message || e)}`;
+      this.el.appendChild(hint);
+    }
   }
 }
 
@@ -307,7 +368,6 @@ class SingleModelViewer {
   private canvas: HTMLCanvasElement;
   private titleEl: HTMLDivElement;
   private selAnim: HTMLSelectElement;
-  private selTeam: HTMLSelectElement;
   private rngSpeed: HTMLInputElement;
   private rngBg: HTMLInputElement;
   private txtSpeed: HTMLSpanElement;
@@ -385,11 +445,6 @@ class SingleModelViewer {
             </div>
 
             <div class="single-field">
-              <label>队伍颜色</label>
-              <select class="field-select" id="singleTeam"></select>
-            </div>
-
-            <div class="single-field">
               <div class="single-label-row">
                 <label>播放速度</label>
                 <span class="single-val" id="singleSpeedVal">1.00x</span>
@@ -437,7 +492,6 @@ class SingleModelViewer {
     this.canvas = this.overlay.querySelector('canvas.single-canvas') as HTMLCanvasElement;
     this.titleEl = this.overlay.querySelector('.single-title') as HTMLDivElement;
     this.selAnim = this.overlay.querySelector('#singleAnim') as HTMLSelectElement;
-    this.selTeam = this.overlay.querySelector('#singleTeam') as HTMLSelectElement;
     this.rngSpeed = this.overlay.querySelector('#singleSpeed') as HTMLInputElement;
     this.rngBg = this.overlay.querySelector('#singleBg') as HTMLInputElement;
     this.txtSpeed = this.overlay.querySelector('#singleSpeedVal') as HTMLSpanElement;
@@ -488,11 +542,21 @@ class SingleModelViewer {
       this.renderer.setFrame(this.renderer.getFrame());
     });
 
-    this.selTeam.addEventListener('change', () => {
+    this.selAnim.addEventListener('wheel', (e) => {
       if (!this.renderer) return;
-      const idx = Math.max(0, Math.min(11, parseInt(this.selTeam.value, 10) || 0));
-      this.renderer.setTeamColor(this.teamColors[idx]);
-    });
+      const count = this.selAnim.options.length;
+      if (count <= 1) return;
+      e.preventDefault();
+
+      const cur = Math.max(0, Math.min(count - 1, parseInt(this.selAnim.value, 10) || 0));
+      const dir = e.deltaY > 0 ? 1 : -1;
+      let next = (cur + dir) % count;
+      if (next < 0) next += count;
+      this.selAnim.value = String(next);
+      this.renderer.setSequence(next);
+      this.renderer.setFrame(this.renderer.getFrame());
+    }, { passive: false });
+
 
     const updateSpeedLabel = () => {
       const v = parseFloat(this.rngSpeed.value);
@@ -502,13 +566,14 @@ class SingleModelViewer {
     this.rngSpeed.addEventListener('input', updateSpeedLabel);
 
     this.rngBg.addEventListener('input', () => {
-      const a = parseFloat(this.rngBg.value);
-      this.txtBg.textContent = a.toFixed(2);
-      // best-effort: tweak internal clearValue alpha
+      const v = parseFloat(this.rngBg.value);
+      this.txtBg.textContent = v.toFixed(2);
+      // v=1 => black, v=0 => white
+      const c = Math.max(0, Math.min(1, 1 - v));
       const r: any = this.renderer as any;
       try {
         if (r?.gpuRenderPassDescriptor?.colorAttachments?.[0]) {
-          r.gpuRenderPassDescriptor.colorAttachments[0].clearValue = [0, 0, 0, a];
+          r.gpuRenderPassDescriptor.colorAttachments[0].clearValue = [c, c, c, 1];
         }
       } catch {}
     });
@@ -602,18 +667,6 @@ class SingleModelViewer {
     });
 
     this.overlay.style.display = 'none';
-    this.populateTeamOptions();
-  }
-
-  private populateTeamOptions() {
-    this.selTeam.innerHTML = '';
-    for (let i = 0; i < this.teamColors.length; i++) {
-      const opt = document.createElement('option');
-      opt.value = String(i);
-      opt.textContent = String(i);
-      this.selTeam.appendChild(opt);
-    }
-    this.selTeam.value = '0';
   }
 
   private computeCamera(model: Model) {
@@ -653,6 +706,7 @@ class SingleModelViewer {
         const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
         model = parseMDL(text);
       }
+      ensureModelHasSequence(model);
       this.model = model;
       this.computeCamera(model);
 
