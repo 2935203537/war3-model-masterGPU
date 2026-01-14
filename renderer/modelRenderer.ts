@@ -290,6 +290,70 @@ export class ModelRenderer {
     private particlesEnabled: boolean = true;
     private ribbonsEnabled: boolean = true;
 
+    private getUvSetIndex(geoset: Geoset, coordId: number | null | undefined): number {
+        const tv = geoset?.TVertices;
+        const count = tv ? tv.length : 0;
+        if (!count) return 0;
+        const raw = (typeof coordId === 'number' && Number.isFinite(coordId)) ? (coordId | 0) : 0;
+        if (raw <= 0) return 0;
+        return raw >= count ? (count - 1) : raw;
+    }
+
+    private getSDGeosetBucket(geoset: Geoset): number {
+        const material = this.model.Materials[geoset.MaterialID];
+        if (!material || !material.Layers) return 0;
+
+        let bucket = 0;
+        for (let i = 0; i < material.Layers.length; i++) {
+            const layer = material.Layers[i];
+            const shading = layer.Shading || 0;
+            const filterMode = layer.FilterMode || 0;
+            const noDepthTest = Boolean(shading & LayerShading.NoDepthTest);
+            const noDepthSet = Boolean(shading & LayerShading.NoDepthSet);
+            if (noDepthTest || noDepthSet) {
+                return 2;
+            }
+            if (
+                filterMode === FilterMode.Blend ||
+                filterMode === FilterMode.Additive ||
+                filterMode === FilterMode.AddAlpha ||
+                filterMode === FilterMode.Modulate ||
+                filterMode === FilterMode.Modulate2x
+            ) {
+                bucket = 2;
+            } else if (filterMode === FilterMode.Transparent) {
+                bucket = Math.max(bucket, 1);
+            }
+        }
+        return bucket;
+    }
+
+    private getGeosetDrawOrder(levelOfDetail: number): number[] {
+        const order: number[] = [];
+        for (let i = 0; i < this.model.Geosets.length; ++i) {
+            const geoset = this.model.Geosets[i];
+            if (this.rendererData.geosetAlpha[i] < 1e-6) {
+                continue;
+            }
+            if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
+                continue;
+            }
+            order.push(i);
+        }
+
+        if (this.isHD) {
+            return order;
+        }
+
+        order.sort((a, b) => {
+            const ba = this.getSDGeosetBucket(this.model.Geosets[a]);
+            const bb = this.getSDGeosetBucket(this.model.Geosets[b]);
+            if (ba !== bb) return ba - bb;
+            return a - b;
+        });
+        return order;
+    }
+
     /** Enable/disable ParticleEmitter2 updates+rendering (useful for thumbnail grids). */
     public setParticlesEnabled(enabled: boolean): void {
         this.particlesEnabled = enabled;
@@ -310,7 +374,7 @@ export class ModelRenderer {
     private vertexBuffer: WebGLBuffer[] = [];
     private normalBuffer: WebGLBuffer[] = [];
     private vertices: Float32Array[] = []; // Array per geoset for software skinning
-    private texCoordBuffer: WebGLBuffer[] = [];
+    private texCoordBuffer: WebGLBuffer[][] = [];
     private indexBuffer: WebGLBuffer[] = [];
     private wireframeIndexBuffer: WebGLBuffer[] = [];
     private wireframeIndexGPUBuffer: GPUBuffer[] = [];
@@ -357,7 +421,7 @@ export class ModelRenderer {
     private gpuDepthTexture: GPUTexture;
     private gpuVertexBuffer: GPUBuffer[] = [];
     private gpuNormalBuffer: GPUBuffer[] = [];
-    private gpuTexCoordBuffer: GPUBuffer[] = [];
+    private gpuTexCoordBuffer: GPUBuffer[][] = [];
     private gpuGroupBuffer: GPUBuffer[] = [];
     private gpuIndexBuffer: GPUBuffer[] = [];
     private gpuSkinWeightBuffer: GPUBuffer[] = [];
@@ -367,7 +431,7 @@ export class ModelRenderer {
     private gpuFSUniformsBuffers: GPUBuffer[][] = [];
 
     constructor(model: Model) {
-        this.isHD = model.Geosets?.some(it => it.SkinWeights?.length > 0);
+        this.isHD = (model.Version ?? 0) >= 1100;
 
         this.shaderProgramLocations = {
             vertexPositionAttribute: null,
@@ -523,8 +587,11 @@ export class ModelRenderer {
             for (const buffer of this.gpuNormalBuffer) {
                 buffer.destroy();
             }
-            for (const buffer of this.gpuTexCoordBuffer) {
-                buffer.destroy();
+            for (const perGeoset of this.gpuTexCoordBuffer) {
+                if (!perGeoset) continue;
+                for (const buffer of perGeoset) {
+                    buffer?.destroy();
+                }
             }
             for (const buffer of this.gpuGroupBuffer) {
                 buffer.destroy();
@@ -1001,14 +1068,10 @@ export class ModelRenderer {
             }
             this.device.queue.writeBuffer(this.gpuVSUniformsBuffer, 0, VSUniformsValues);
 
-            for (let i = 0; i < this.model.Geosets.length; ++i) {
+            const geosetOrder = this.getGeosetDrawOrder(levelOfDetail);
+            for (let orderIndex = 0; orderIndex < geosetOrder.length; ++orderIndex) {
+                const i = geosetOrder[orderIndex];
                 const geoset = this.model.Geosets[i];
-                if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                    continue;
-                }
-                if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                    continue;
-                }
 
                 if (wireframe && !this.wireframeIndexGPUBuffer[i]) {
                     this.createWireframeGPUBuffer(i);
@@ -1019,7 +1082,7 @@ export class ModelRenderer {
 
                 pass.setVertexBuffer(0, this.gpuVertexBuffer[i]);
                 pass.setVertexBuffer(1, this.gpuNormalBuffer[i]);
-                pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i]);
+                pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i][0]);
 
                 if (this.isHD) {
                     pass.setVertexBuffer(3, this.gpuTangentBuffer[i]);
@@ -1033,6 +1096,8 @@ export class ModelRenderer {
 
                 if (this.isHD) {
                     const baseLayer = material.Layers[0];
+                    const uvIndex = this.getUvSetIndex(geoset, baseLayer?.CoordId);
+                    pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i][uvIndex]);
                     if (depthTextureTarget && !FILTER_MODES_WITH_DEPTH_WRITE.has(baseLayer.FilterMode || 0)) {
                         continue;
                     }
@@ -1187,6 +1252,9 @@ export class ModelRenderer {
                         const textureID = this.rendererData.materialLayerTextureID[materialID][j];
                         const texture = this.model.Textures[textureID];
 
+                        const uvIndex = this.getUvSetIndex(geoset, layer.CoordId);
+                        pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i][uvIndex]);
+
                         const pipeline = wireframe ? this.gpuWireframePipeline : this.getGPUPipeline(layer);
                         pass.setPipeline(pipeline);
 
@@ -1302,14 +1370,10 @@ export class ModelRenderer {
         }
 
 
-        for (let i = 0; i < this.model.Geosets.length; ++i) {
+        const geosetOrder = this.getGeosetDrawOrder(levelOfDetail);
+        for (let orderIndex = 0; orderIndex < geosetOrder.length; ++orderIndex) {
+            const i = geosetOrder[orderIndex];
             const geoset = this.model.Geosets[i];
-            if (this.rendererData.geosetAlpha[i] < 1e-6) {
-                continue;
-            }
-            if (geoset.LevelOfDetail !== undefined && geoset.LevelOfDetail !== levelOfDetail) {
-                continue;
-            }
 
             if (this.softwareSkinning) {
                 this.generateGeosetVertices(i);
@@ -1366,7 +1430,9 @@ export class ModelRenderer {
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[i]);
                 this.gl.vertexAttribPointer(this.shaderProgramLocations.normalsAttribute, 3, this.gl.FLOAT, false, 0, 0);
 
-                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i]);
+                const baseLayer = material.Layers[0];
+                const uvIndex = this.getUvSetIndex(geoset, baseLayer?.CoordId);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i][uvIndex]);
                 this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
 
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.skinWeightBuffer[i]);
@@ -1394,7 +1460,8 @@ export class ModelRenderer {
                 }
             } else {
                 for (let j = 0; j < material.Layers.length; ++j) {
-                    this.setLayerProps(material.Layers[j], this.rendererData.materialLayerTextureID[materialID][j]);
+                    const layer = material.Layers[j];
+                    this.setLayerProps(layer, this.rendererData.materialLayerTextureID[materialID][j]);
 
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer[i]);
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.vertexPositionAttribute, 3, this.gl.FLOAT, false, 0, 0);
@@ -1402,7 +1469,8 @@ export class ModelRenderer {
                     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[i]);
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.normalsAttribute, 3, this.gl.FLOAT, false, 0, 0);
 
-                    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i]);
+                    const uvIndex = this.getUvSetIndex(geoset, layer.CoordId);
+                    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i][uvIndex]);
                     this.gl.vertexAttribPointer(this.shaderProgramLocations.textureCoordAttribute, 2, this.gl.FLOAT, false, 0, 0);
 
                     if (!this.softwareSkinning) {
@@ -2811,9 +2879,12 @@ export class ModelRenderer {
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalBuffer[i]);
             this.gl.bufferData(this.gl.ARRAY_BUFFER, geoset.Normals, this.gl.STATIC_DRAW);
 
-            this.texCoordBuffer[i] = this.gl.createBuffer();
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i]);
-            this.gl.bufferData(this.gl.ARRAY_BUFFER, geoset.TVertices[0], this.gl.STATIC_DRAW);
+            this.texCoordBuffer[i] = [];
+            for (let uv = 0; uv < geoset.TVertices.length; uv++) {
+                this.texCoordBuffer[i][uv] = this.gl.createBuffer();
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.texCoordBuffer[i][uv]);
+                this.gl.bufferData(this.gl.ARRAY_BUFFER, geoset.TVertices[uv], this.gl.STATIC_DRAW);
+            }
 
             if (this.isHD) {
                 this.skinWeightBuffer[i] = this.gl.createBuffer();
@@ -2931,8 +3002,20 @@ export class ModelRenderer {
         });
     }
 
-    private createGPUPipelineByLayer (filterMode: FilterMode, twoSided: boolean) : GPURenderPipeline {
-        return this.createGPUPipeline(...GPU_LAYER_PROPS[filterMode], undefined, {
+    private createGPUPipelineByLayer (
+        filterMode: FilterMode,
+        twoSided: boolean,
+        noDepthTest: boolean,
+        noDepthSet: boolean
+    ) : GPURenderPipeline {
+        const [name, blend, baseDepth] = GPU_LAYER_PROPS[filterMode];
+        const depth: GPUDepthStencilState = {
+            ...baseDepth,
+            depthWriteEnabled: noDepthSet ? false : baseDepth.depthWriteEnabled,
+            depthCompare: noDepthTest ? 'always' : baseDepth.depthCompare
+        };
+
+        return this.createGPUPipeline(`${name}-${twoSided}-${noDepthTest}-${noDepthSet}`, blend, depth, undefined, {
             primitive: {
                 cullMode: twoSided ? 'none' : 'back'
             }
@@ -2941,12 +3024,15 @@ export class ModelRenderer {
 
     private getGPUPipeline (layer: Layer): GPURenderPipeline {
         const filterMode = layer.FilterMode || 0;
-        const twoSided = Boolean((layer.Shading || 0) & LayerShading.TwoSided);
+        const shading = layer.Shading || 0;
+        const twoSided = Boolean(shading & LayerShading.TwoSided);
+        const noDepthTest = Boolean(shading & LayerShading.NoDepthTest);
+        const noDepthSet = Boolean(shading & LayerShading.NoDepthSet);
 
-        const key = `${filterMode}-${twoSided}`;
+        const key = `${filterMode}-${twoSided}-${noDepthTest}-${noDepthSet}`;
 
         if (!this.gpuPipelines[key]) {
-            this.gpuPipelines[key] = this.createGPUPipelineByLayer(filterMode, twoSided);
+            this.gpuPipelines[key] = this.createGPUPipelineByLayer(filterMode, twoSided, noDepthTest, noDepthSet);
         }
 
         return this.gpuPipelines[key];
@@ -3202,16 +3288,19 @@ export class ModelRenderer {
             ).set(geoset.Normals);
             this.gpuNormalBuffer[i].unmap();
 
-            this.gpuTexCoordBuffer[i] = this.device.createBuffer({
-                label: `texCoord ${i}`,
-                size: geoset.TVertices[0].byteLength,
-                usage: GPUBufferUsage.VERTEX,
-                mappedAtCreation: true
-            });
-            new Float32Array(
-                this.gpuTexCoordBuffer[i].getMappedRange(0, this.gpuTexCoordBuffer[i].size)
-            ).set(geoset.TVertices[0]);
-            this.gpuTexCoordBuffer[i].unmap();
+            this.gpuTexCoordBuffer[i] = [];
+            for (let uv = 0; uv < geoset.TVertices.length; uv++) {
+                this.gpuTexCoordBuffer[i][uv] = this.device.createBuffer({
+                    label: `texCoord ${i} ${uv}`,
+                    size: geoset.TVertices[uv].byteLength,
+                    usage: GPUBufferUsage.VERTEX,
+                    mappedAtCreation: true
+                });
+                new Float32Array(
+                    this.gpuTexCoordBuffer[i][uv].getMappedRange(0, this.gpuTexCoordBuffer[i][uv].size)
+                ).set(geoset.TVertices[uv]);
+                this.gpuTexCoordBuffer[i][uv].unmap();
+            }
 
             if (this.isHD) {
                 this.gpuSkinWeightBuffer[i] = this.device.createBuffer({
