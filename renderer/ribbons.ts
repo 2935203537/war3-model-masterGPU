@@ -10,6 +10,9 @@ import vertexShader from './shaders/webgl/ribbon.vs.glsl?raw';
 import fragmentShader from './shaders/webgl/ribbon.fs.glsl?raw';
 import ribbonShader from './shaders/webgpu/ribbons.wgsl?raw';
 
+const toGpuBufferSource = (data: ArrayBufferView): GPUAllowSharedBufferSource =>
+    data as unknown as GPUAllowSharedBufferSource;
+
 // NOTE: Must match ModelRenderer's multisample count for the main render pass.
 const WEBGPU_MULTISAMPLE_COUNT = 4;
 
@@ -295,12 +298,12 @@ export class RibbonsController {
             createPipeline('additive', {
                 color: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 },
                 alpha: {
                     operation: 'add',
-                    srcFactor: 'src',
+                    srcFactor: 'src-alpha',
                     dstFactor: 'one'
                 }
             }, {
@@ -428,8 +431,8 @@ export class RibbonsController {
                 continue;
             }
 
-            this.device.queue.writeBuffer(emitter.vertexGPUBuffer, 0, emitter.vertices);
-            this.device.queue.writeBuffer(emitter.texCoordGPUBuffer, 0, emitter.texCoords);
+            this.device.queue.writeBuffer(emitter.vertexGPUBuffer, 0, toGpuBufferSource(emitter.vertices));
+            this.device.queue.writeBuffer(emitter.texCoordGPUBuffer, 0, toGpuBufferSource(emitter.texCoords));
 
             pass.setVertexBuffer(0, emitter.vertexGPUBuffer);
             pass.setVertexBuffer(1, emitter.texCoordGPUBuffer);
@@ -691,7 +694,7 @@ export class RibbonsController {
         } else if (layer.FilterMode === FilterMode.Additive) {
             this.gl.enable(this.gl.BLEND);
             this.gl.enable(this.gl.DEPTH_TEST);
-            this.gl.blendFunc(this.gl.SRC_COLOR, this.gl.ONE);
+            this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE);
             this.gl.depthMask(false);
         } else if (layer.FilterMode === FilterMode.AddAlpha) {
             this.gl.enable(this.gl.BLEND);

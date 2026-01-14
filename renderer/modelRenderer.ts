@@ -48,7 +48,7 @@ export type DDS_FORMAT = WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGBA_S3TC_DXT5_EXT'] |
     WEBGL_compressed_texture_s3tc['COMPRESSED_RGB_S3TC_DXT1_EXT'];
 
-const MAX_NODES = 254;
+const MAX_NODES = 512;
 
 const ENV_MAP_SIZE = 2048;
 const ENV_CONVOLUTE_DIFFUSE_SIZE = 32;
@@ -987,6 +987,13 @@ export class ModelRenderer {
             };
             VSUniformsViews.mvMatrix.set(mvMatrix);
             VSUniformsViews.pMatrix.set(pMatrix);
+            for (let j = 0; j < MAX_NODES; ++j) {
+                const base = j * 16;
+                VSUniformsViews.nodesMatrices[base + 0] = 1;
+                VSUniformsViews.nodesMatrices[base + 5] = 1;
+                VSUniformsViews.nodesMatrices[base + 10] = 1;
+                VSUniformsViews.nodesMatrices[base + 15] = 1;
+            }
             for (let j = 0; j < MAX_NODES; ++j) {
                 if (this.rendererData.nodes[j]) {
                     VSUniformsViews.nodesMatrices.set(this.rendererData.nodes[j].matrix, j * 16);
@@ -2901,11 +2908,11 @@ export class ModelRenderer {
                     }]
                 }] : [{
                     // group
-                    arrayStride: 4,
+                    arrayStride: 8,
                     attributes: [{
                         shaderLocation: 3,
                         offset: 0,
-                        format: 'uint8x4' as const
+                        format: 'uint16x4' as const
                     }]
                 }])]
             },
@@ -3229,22 +3236,34 @@ export class ModelRenderer {
                 ).set(geoset.Tangents);
                 this.gpuTangentBuffer[i].unmap();
             } else {
-                const buffer = new Uint8Array(geoset.VertexGroup.length * 4);
+                const buffer = new Uint16Array(geoset.VertexGroup.length * 4);
                 for (let j = 0; j < buffer.length; j += 4) {
                     const index = j / 4;
-                    const group = geoset.Groups[geoset.VertexGroup[index]];
-                    buffer[j] = group[0];
-                    buffer[j + 1] = group.length > 1 ? group[1] : MAX_NODES;
-                    buffer[j + 2] = group.length > 2 ? group[2] : MAX_NODES;
-                    buffer[j + 3] = group.length > 3 ? group[3] : MAX_NODES;
+                    const vg = geoset.VertexGroup[index];
+                    const group = geoset.Groups[vg];
+
+                    // Defensive: some models can have invalid vertex-group indices.
+                    // Fall back to MAX_NODES so the model can still render.
+                    if (!group || group.length === 0) {
+                        buffer[j] = MAX_NODES;
+                        buffer[j + 1] = MAX_NODES;
+                        buffer[j + 2] = MAX_NODES;
+                        buffer[j + 3] = MAX_NODES;
+                        continue;
+                    }
+
+                    buffer[j] = group[0] < MAX_NODES ? group[0] : MAX_NODES;
+                    buffer[j + 1] = group.length > 1 ? (group[1] < MAX_NODES ? group[1] : MAX_NODES) : MAX_NODES;
+                    buffer[j + 2] = group.length > 2 ? (group[2] < MAX_NODES ? group[2] : MAX_NODES) : MAX_NODES;
+                    buffer[j + 3] = group.length > 3 ? (group[3] < MAX_NODES ? group[3] : MAX_NODES) : MAX_NODES;
                 }
                 this.gpuGroupBuffer[i] = this.device.createBuffer({
                     label: `group ${i}`,
-                    size: 4 * geoset.VertexGroup.length,
+                    size: 8 * geoset.VertexGroup.length,
                     usage: GPUBufferUsage.VERTEX,
                     mappedAtCreation: true
                 });
-                new Uint8Array(
+                new Uint16Array(
                     this.gpuGroupBuffer[i].getMappedRange(0, this.gpuGroupBuffer[i].size)
                 ).set(buffer);
                 this.gpuGroupBuffer[i].unmap();
