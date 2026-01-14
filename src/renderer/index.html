@@ -8,36 +8,61 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="left">
+    <div class="toolbar-left">
       <button id="btnPick" class="btn">选择文件夹</button>
       <button id="btnPickMap" class="btn">打开W3X/W3M</button>
+
       <div class="field">
-        <label>加载数量</label>
+        <label>数量</label>
         <input id="inpLimit" type="number" min="1" value="50" />
       </div>
-      <div class="field">
-        <label>Tile</label>
-        <select id="selSize">
-          <option value="128">128</option>
-          <option value="192">192</option>
-          <option value="256" selected>256</option>
-          <option value="320">320</option>
-        </select>
+
+      <div class="pager">
+        <button id="btnPrev" class="btn btn-ghost" title="上一页">&lt;</button>
+        <span id="txtPage" class="pager-text">0/0</span>
+        <button id="btnNext" class="btn btn-ghost" title="下一页">&gt;</button>
       </div>
-      <label class="toggle"><input id="togAnim" type="checkbox" checked />动画</label>
       <label class="toggle"><input id="togRotate" type="checkbox" checked />旋转</label>
-      <label class="toggle"><input id="togParticles" type="checkbox" />粒子</label>
-      <label class="toggle"><input id="togRibbons" type="checkbox" />飘带</label>
-      <span id="status" class="status">未选择文件夹</span>
     </div>
-    <div class="right">
+
+    <div class="toolbar-right">
       <input id="inpFilter" class="search" placeholder="过滤（输入关键字）" />
       <span id="war3Status" class="status">War3: 未检测</span>
     </div>
   </header>
 
-  <main class="content">
-    <div id="grid" class="grid"></div>
+  <main class="app">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="sidebar-title">批量模型</div>
+        <div id="status" class="sidebar-sub">未选择文件夹</div>
+      </div>
+
+      <div class="sidebar-actions">
+        <button id="btnSelAll" class="btn btn-ghost">全选</button>
+        <button id="btnSelNone" class="btn btn-ghost">取消</button>
+      </div>
+
+      <div id="fileList" class="file-list"></div>
+
+      <div class="sidebar-foot">
+        <div class="export-row">
+          <div class="export-label">导出：</div>
+          <div id="txtOutDir" class="export-value">未选择</div>
+        </div>
+        <div class="sidebar-actions">
+          <button id="btnPickOut" class="btn">选择目录</button>
+        </div>
+        <div class="sidebar-actions">
+          <button id="btnExportSelected" class="btn">导出选中</button>
+          <button id="btnExportAll" class="btn btn-ghost">导出全部</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="main">
+      <div id="grid" class="grid"></div>
+    </section>
   </main>
 
   <script type="module" src="./main.ts"></script>

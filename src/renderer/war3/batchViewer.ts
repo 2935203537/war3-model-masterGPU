@@ -1,4 +1,4 @@
-import { ModelRenderer, parseMDL, parseMDX } from 'war3-model';
+import { ModelRenderer, parseMDL, parseMDX, generateMDL, generateMDX } from 'war3-model';
 import type { Model } from 'war3-model';
 import { mat4, vec3, quat } from 'gl-matrix';
 import { loadTextureIntoRenderer, resolveTextureAbs, type FileIndex } from './textureLoader';
@@ -18,10 +18,32 @@ function isMDXBytes(bytes: Uint8Array): boolean {
     bytes[3] === 0x58;
 }
 
+function normalizeExportRel(p: string): string {
+  const s = (p || '').trim().replace(/^mpq:auto:/i, '').replace(/\\/g, '/');
+  return s.replace(/^\/+/, '');
+}
+
+function baseName(p: string): string {
+  const n = (p || '').replace(/\\/g, '/');
+  const parts = n.split('/');
+  return parts[parts.length - 1] || n;
+}
+
 type FolderData = {
   root: string;
   files: { abs: string; rel: string; ext: string; base: string }[];
   models: string[];
+};
+
+export type ViewerSettings = {
+  tileSize: number;
+  limit: number;
+  page: number;
+  filter: string;
+  animate: boolean;
+  rotate: boolean;
+  particles: boolean;
+  ribbons: boolean;
 };
 
 type GPUShared = {
@@ -61,7 +83,7 @@ async function initWebGPU(): Promise<GPUShared> {
   if (!adapter) throw new Error('Failed to request WebGPU adapter');
   const hasGPUBC = adapter.features.has('texture-compression-bc');
   const device = await adapter.requestDevice({
-    requiredFeatures: hasGPUBC ? ['texture-compression-bc'] : [],
+    requiredFeatures: (hasGPUBC ? ['texture-compression-bc'] : []) as GPUFeatureName[],
   });
   const format = navigator.gpu.getPreferredCanvasFormat();
   return { device, format, hasGPUBC };
@@ -151,14 +173,21 @@ class ModelTile {
       });
 
       const renderer = new ModelRenderer(model);
-      const s = this.getSettings();
-      renderer.setEffectsEnabled({ particles: s.particles, ribbons: s.ribbons });
+      renderer.setEffectsEnabled({ particles: true, ribbons: true });
       renderer.setTeamColor(vec3.fromValues(1, 0, 0));
       if (model.Sequences?.length) {
         renderer.setSequence(0);
       }
 
       await renderer.initGPUDevice(this.canvas, this.gpu.device, ctx);
+
+      // Force black background (best-effort).
+      try {
+        const r: any = renderer as any;
+        if (r?.gpuRenderPassDescriptor?.colorAttachments?.[0]) {
+          r.gpuRenderPassDescriptor.colorAttachments[0].clearValue = [0, 0, 0, 1];
+        }
+      } catch {}
 
       // Load textures (best-effort, missing textures will use internal empty texture).
       await this.loadTextures(model, renderer);
@@ -224,7 +253,7 @@ class ModelTile {
     if (!this.visible || !this.loaded || !this.renderer || !this.model) return;
 
     const s = this.getSettings();
-    this.renderer.setEffectsEnabled({ particles: s.particles, ribbons: s.ribbons });
+    this.renderer.setEffectsEnabled({ particles: true, ribbons: true });
 
 
     // Throttle thumbnails to ~15 FPS to keep batch views responsive.
@@ -281,9 +310,18 @@ class SingleModelViewer {
   private selTeam: HTMLSelectElement;
   private rngSpeed: HTMLInputElement;
   private rngBg: HTMLInputElement;
+  private txtSpeed: HTMLSpanElement;
+  private txtBg: HTMLSpanElement;
+  private inpOutDir: HTMLInputElement;
+  private btnPickOut: HTMLButtonElement;
+  private inpExportName: HTMLInputElement;
+  private btnRename: HTMLButtonElement;
+  private chkRenameTextures: HTMLInputElement;
   private btnBack: HTMLButtonElement;
   private btnExport: HTMLButtonElement;
   private btnShot: HTMLButtonElement;
+
+  private outDir: string | null = null;
 
   private renderer: ModelRenderer | null = null;
   private model: Model | null = null;
@@ -320,49 +358,77 @@ class SingleModelViewer {
 
   constructor(
     private readonly readFile: (p: string) => Promise<Uint8Array>,
-    private readonly getSettings: () => ViewerSettings,
   ) {
     // build DOM
     this.overlay = document.createElement('div');
     this.overlay.className = 'single-overlay';
     this.overlay.innerHTML = `
-      <div style="display:flex;height:100%">
+      <div class="single-shell">
         <div class="single-left">
           <div class="single-canvas-wrap">
             <canvas class="single-canvas" width="960" height="720"></canvas>
-            <div class="single-hint">左键拖动：旋转\n滚轮：缩放\nESC：返回</div>
+            <div class="single-hint">拖动：旋转  |  滚轮：缩放  |  ESC：关闭</div>
           </div>
         </div>
         <div class="single-right">
-          <div class="single-title"></div>
-          <div class="single-hr"></div>
-
-          <div class="single-field">
-            <label>模型动作</label>
-            <select class="field-select" id="singleAnim"></select>
+          <div class="single-top">
+            <div class="single-title"></div>
+            <button class="btn btn-ghost" id="singleBack">关闭(Esc)</button>
           </div>
 
-          <div class="single-field">
-            <label>队伍颜色</label>
-            <select class="field-select" id="singleTeam"></select>
+          <div class="single-group">
+            <div class="single-group-title">控制台</div>
+
+            <div class="single-field">
+              <label>模型动作</label>
+              <select class="field-select" id="singleAnim"></select>
+            </div>
+
+            <div class="single-field">
+              <label>队伍颜色</label>
+              <select class="field-select" id="singleTeam"></select>
+            </div>
+
+            <div class="single-field">
+              <div class="single-label-row">
+                <label>播放速度</label>
+                <span class="single-val" id="singleSpeedVal">1.00x</span>
+              </div>
+              <input id="singleSpeed" type="range" min="0" max="2" step="0.01" value="1" />
+            </div>
+
+            <div class="single-field">
+              <div class="single-label-row">
+                <label>背景透明度</label>
+                <span class="single-val" id="singleBgVal">1.00</span>
+              </div>
+              <input id="singleBg" type="range" min="0" max="1" step="0.01" value="1" />
+            </div>
           </div>
 
-          <div class="single-field">
-            <label>播放速度</label>
-            <input id="singleSpeed" type="range" min="0" max="2" step="0.01" value="1" />
+          <div class="single-group">
+            <div class="single-group-title">操作</div>
+
+            <div class="single-field">
+              <label>导出目录</label>
+              <div class="single-row">
+                <input class="field-input" id="singleOutDir" placeholder="未选择" readonly />
+                <button class="btn" id="singlePickOut">选择...</button>
+              </div>
+            </div>
+
+            <div class="single-field">
+              <label>导出文件名</label>
+              <div class="single-row">
+                <input class="field-input" id="singleExportName" placeholder="model" />
+                <button class="btn" id="singleRename">重命名</button>
+              </div>
+              <label class="single-check"><input id="singleRenameTextures" type="checkbox" /> 重命名贴图 (tex0/tex1...)</label>
+            </div>
+
+            <button class="btn" id="singleExport">导出模型与贴图</button>
+            <button class="btn btn-ghost" id="singleShot">导出当前截图（PNG）</button>
           </div>
-
-          <div class="single-field">
-            <label>背景透明度</label>
-            <input id="singleBg" type="range" min="0" max="1" step="0.01" value="1" />
-          </div>
-
-          <div class="single-hr"></div>
-
-          <button class="btn" id="singleExport">导出模型以及贴图（选择目录）</button>
-          <button class="btn" id="singleShot">导出当前截图（PNG）</button>
-          <div style="flex:1"></div>
-          <button class="btn" id="singleBack">返回</button>
         </div>
       </div>
     `;
@@ -374,6 +440,13 @@ class SingleModelViewer {
     this.selTeam = this.overlay.querySelector('#singleTeam') as HTMLSelectElement;
     this.rngSpeed = this.overlay.querySelector('#singleSpeed') as HTMLInputElement;
     this.rngBg = this.overlay.querySelector('#singleBg') as HTMLInputElement;
+    this.txtSpeed = this.overlay.querySelector('#singleSpeedVal') as HTMLSpanElement;
+    this.txtBg = this.overlay.querySelector('#singleBgVal') as HTMLSpanElement;
+    this.inpOutDir = this.overlay.querySelector('#singleOutDir') as HTMLInputElement;
+    this.btnPickOut = this.overlay.querySelector('#singlePickOut') as HTMLButtonElement;
+    this.inpExportName = this.overlay.querySelector('#singleExportName') as HTMLInputElement;
+    this.btnRename = this.overlay.querySelector('#singleRename') as HTMLButtonElement;
+    this.chkRenameTextures = this.overlay.querySelector('#singleRenameTextures') as HTMLInputElement;
     this.btnBack = this.overlay.querySelector('#singleBack') as HTMLButtonElement;
     this.btnExport = this.overlay.querySelector('#singleExport') as HTMLButtonElement;
     this.btnShot = this.overlay.querySelector('#singleShot') as HTMLButtonElement;
@@ -421,8 +494,16 @@ class SingleModelViewer {
       this.renderer.setTeamColor(this.teamColors[idx]);
     });
 
+    const updateSpeedLabel = () => {
+      const v = parseFloat(this.rngSpeed.value);
+      this.txtSpeed.textContent = `${v.toFixed(2)}x`;
+    };
+    updateSpeedLabel();
+    this.rngSpeed.addEventListener('input', updateSpeedLabel);
+
     this.rngBg.addEventListener('input', () => {
       const a = parseFloat(this.rngBg.value);
+      this.txtBg.textContent = a.toFixed(2);
       // best-effort: tweak internal clearValue alpha
       const r: any = this.renderer as any;
       try {
@@ -432,24 +513,80 @@ class SingleModelViewer {
       } catch {}
     });
 
-    this.btnExport.addEventListener('click', async () => {
-      if (!window.war3Desktop || !this.model || !this.idx || !this.modelAbs) return;
+    this.btnPickOut.addEventListener('click', async () => {
+      if (!window.war3Desktop) return;
       const out = await window.war3Desktop.selectExportFolder();
       if (!out) return;
+      this.outDir = out;
+      this.inpOutDir.value = out;
+    });
 
-      const items: { src: string; rel: string }[] = [];
-      // export model
-      const relModel = this.toRelFromRoot(this.modelAbs, this.idx.root);
-      if (relModel) items.push({ src: this.modelAbs, rel: relModel });
-      // export referenced textures
-      for (const tex of this.model.Textures || []) {
+    this.btnRename.addEventListener('click', () => {
+      this.inpExportName.value = (this.inpExportName.value || '').trim();
+    });
+
+    this.btnExport.addEventListener('click', async () => {
+      if (!window.war3Desktop || !this.model || !this.idx || !this.modelAbs) return;
+      const out = this.outDir || await window.war3Desktop.selectExportFolder();
+      if (!out) return;
+      this.outDir = out;
+      this.inpOutDir.value = out;
+
+      const exportName = (this.inpExportName.value || '').trim() || (this.modelAbs.split(/[\\/]/).pop() || 'model').replace(/\.[^.]+$/, '');
+      const renameTextures = Boolean(this.chkRenameTextures.checked);
+
+      const bytes = await this.readFile(this.modelAbs);
+      const isMDX = this.modelAbs.toLowerCase().endsWith('.mdx') || isMDXBytes(bytes);
+
+      const modelCopy: any = { ...this.model, Textures: (this.model.Textures || []).map(t => ({ ...t })) };
+      const textureExports: { abs: string; rel: string; texIndex: number }[] = [];
+
+      for (let i = 0; i < (this.model.Textures || []).length; i++) {
+        const tex = this.model.Textures[i];
         if (!tex?.Image) continue;
         const abs = resolveTextureAbs(tex.Image, this.modelAbs, this.idx);
         if (!abs) continue;
-        const rel = this.toRelFromRoot(abs, this.idx.root);
-        if (rel) items.push({ src: abs, rel });
+
+        let rel: string;
+        if (renameTextures) {
+          const srcBase = baseName(abs);
+          const dot = srcBase.lastIndexOf('.');
+          const ext = dot >= 0 ? srcBase.slice(dot) : '.blp';
+          rel = `tex/tex${i}${ext}`;
+          modelCopy.Textures[i].Image = rel;
+        } else {
+          rel = normalizeExportRel(tex.Image);
+          if (!rel) rel = baseName(tex.Image);
+        }
+        textureExports.push({ abs, rel, texIndex: i });
       }
-      await window.war3Desktop.exportFiles(out, items);
+
+      if (!renameTextures) {
+        for (let i = 0; i < (modelCopy.Textures || []).length; i++) {
+          const img = modelCopy.Textures[i]?.Image;
+          if (typeof img === 'string') {
+            modelCopy.Textures[i].Image = normalizeExportRel(img);
+          }
+        }
+      }
+
+      const modelExt = isMDX ? '.mdx' : '.mdl';
+      const modelRel = `${exportName}${modelExt}`;
+      if (isMDX) {
+        const outBuf = generateMDX(modelCopy as Model);
+        await window.war3Desktop.writeFile(`${out}/${modelRel}`, new Uint8Array(outBuf));
+      } else {
+        const outText = generateMDL(modelCopy as Model);
+        await window.war3Desktop.writeFile(`${out}/${modelRel}`, new TextEncoder().encode(outText));
+      }
+
+      for (const te of textureExports) {
+        try {
+          const data = await this.readFile(te.abs);
+          await window.war3Desktop.writeFile(`${out}/${te.rel}`, data);
+        } catch {
+        }
+      }
     });
 
     this.btnShot.addEventListener('click', async () => {
@@ -479,15 +616,6 @@ class SingleModelViewer {
     this.selTeam.value = '0';
   }
 
-  private toRelFromRoot(abs: string, root: string): string | null {
-    const a = abs.replace(/\\/g, '/');
-    const r = root.replace(/\\/g, '/');
-    if (!a.toLowerCase().startsWith(r.toLowerCase())) return null;
-    const rel = a.slice(r.length).replace(/^\//, '');
-    if (rel.includes('..')) return null;
-    return rel;
-  }
-
   private computeCamera(model: Model) {
     const info = model.Info;
     if (info?.MinimumExtent && info?.MaximumExtent) {
@@ -511,6 +639,8 @@ class SingleModelViewer {
     this.gpu = gpu;
     this.overlay.style.display = 'block';
     this.titleEl.textContent = modelAbs;
+    this.outDir = null;
+    this.inpOutDir.value = '';
 
     try {
       const bytes = await this.readFile(modelAbs);
@@ -525,6 +655,9 @@ class SingleModelViewer {
       }
       this.model = model;
       this.computeCamera(model);
+
+      const base = modelAbs.split(/[\\/]/).pop() || modelAbs;
+      this.inpExportName.value = base.replace(/\.[^.]+$/, '');
 
       // anim list
       this.selAnim.innerHTML = '';
@@ -558,11 +691,18 @@ class SingleModelViewer {
       ctx.configure({ device: gpu.device, format: gpu.format, alphaMode: 'premultiplied' });
 
       const renderer = new ModelRenderer(model);
-      const s = this.getSettings();
-      renderer.setEffectsEnabled({ particles: s.particles, ribbons: s.ribbons });
+      renderer.setEffectsEnabled({ particles: true, ribbons: true });
       renderer.setTeamColor(this.teamColors[0]);
       if (seqs.length) renderer.setSequence(0);
       await renderer.initGPUDevice(this.canvas, gpu.device, ctx);
+
+      // Force black background (best-effort).
+      try {
+        const r: any = renderer as any;
+        if (r?.gpuRenderPassDescriptor?.colorAttachments?.[0]) {
+          r.gpuRenderPassDescriptor.colorAttachments[0].clearValue = [0, 0, 0, 1];
+        }
+      } catch {}
       await this.loadTextures(model, renderer, idx);
       this.renderer = renderer;
 
@@ -631,7 +771,7 @@ class SingleModelViewer {
     this.renderer.setLightPosition(lightPos);
     this.renderer.setLightColor(vec3.fromValues(1, 1, 1));
 
-    if ((this.getSettings().animate) && (this.model.Sequences?.length)) {
+    if (this.model.Sequences?.length) {
       this.renderer.update(dt);
     }
 
@@ -673,13 +813,19 @@ export class BatchViewer {
   private loadingCount = 0;
   private singleViewer: SingleModelViewer;
 
+  private lastFiltered: string[] = [];
+  private lastPageList: string[] = [];
+  private lastPages = 1;
+  private lastPage = 0;
+  private lastPageSize = 1;
+
   constructor(
     private readonly grid: HTMLElement,
     private readonly statusEl: HTMLElement,
     private readonly readFile: (p: string) => Promise<Uint8Array>,
     private readonly getSettings: () => ViewerSettings,
   ) {
-    this.singleViewer = new SingleModelViewer(this.readFile, this.getSettings);
+    this.singleViewer = new SingleModelViewer(this.readFile);
 
     // Single click a tile to open the single-model viewer.
     this.grid.addEventListener('click', (ev) => {
@@ -732,6 +878,74 @@ export class BatchViewer {
     this.renderTiles();
   }
 
+  public getRenderInfo(): { total: number; filtered: number; page: number; pages: number; pageSize: number } | null {
+    if (!this.folder) return null;
+    return {
+      total: this.folder.models.length,
+      filtered: this.lastFiltered.length,
+      page: this.lastPage,
+      pages: this.lastPages,
+      pageSize: this.lastPageSize,
+    };
+  }
+
+  public getCurrentPageModelRels(): string[] {
+    return this.lastPageList.slice();
+  }
+
+  public getFilteredModelRels(): string[] {
+    return this.lastFiltered.slice();
+  }
+
+  public resolveModelAbs(rel: string): string | null {
+    if (!this.idx) return null;
+    return this.idx.byRelLower.get(rel.replace(/\\/g, '/').toLowerCase()) || null;
+  }
+
+  public async exportModels(outRoot: string, modelRels: string[]): Promise<boolean> {
+    try {
+      if (!outRoot || !window.war3Desktop) return false;
+      if (!this.idx || !this.folder) return false;
+
+      const uniq = Array.from(new Set(modelRels));
+      for (const rel of uniq) {
+        const modelAbs = this.resolveModelAbs(rel);
+        if (!modelAbs) continue;
+
+        // Write model bytes as-is to out/<rel>
+        const modelBytes = await this.readFile(modelAbs);
+        const dstModel = `${outRoot.replace(/\\/g, '/')}/${rel.replace(/\\/g, '/')}`;
+        await window.war3Desktop.writeFile(dstModel, modelBytes);
+
+        // Parse model to enumerate referenced textures.
+        const lower = modelAbs.toLowerCase();
+        let model: Model;
+        const array = modelBytes.buffer.slice(modelBytes.byteOffset, modelBytes.byteOffset + modelBytes.byteLength);
+        if (lower.endsWith('.mdx') || isMDXBytes(modelBytes)) {
+          model = parseMDX(array);
+        } else {
+          const text = new TextDecoder('utf-8', { fatal: false }).decode(modelBytes);
+          model = parseMDL(text);
+        }
+
+        for (const tex of model.Textures || []) {
+          if (!tex?.Image) continue;
+          const abs = resolveTextureAbs(tex.Image, modelAbs, this.idx);
+          if (!abs) continue;
+
+          const texBytes = await this.readFile(abs);
+          const relTex = normalizeExportRel(tex.Image) || baseName(tex.Image);
+          const dstTex = `${outRoot.replace(/\\/g, '/')}/${relTex}`;
+          await window.war3Desktop.writeFile(dstTex, texBytes);
+        }
+      }
+      return true;
+    } catch (e) {
+      console.error(e);
+      return false;
+    }
+  }
+
   private buildIndex(folder: FolderData): FileIndex {
     const byRelLower = new Map<string, string>();
     const byBaseLower = new Map<string, string>();
@@ -757,7 +971,18 @@ export class BatchViewer {
     const filtered = filter
       ? allModels.filter(p => p.toLowerCase().includes(filter))
       : allModels;
-    const list = filtered.slice(0, Math.max(1, s.limit));
+    const pageSize = Math.max(1, s.limit);
+    const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const page = Math.max(0, Math.min(pages - 1, s.page | 0));
+    const start = page * pageSize;
+    const end = start + pageSize;
+    const list = filtered.slice(start, end);
+
+    this.lastFiltered = filtered;
+    this.lastPageList = list;
+    this.lastPages = pages;
+    this.lastPage = page;
+    this.lastPageSize = pageSize;
 
     this.grid.style.setProperty('--tile', `${s.tileSize}px`);
 
@@ -780,7 +1005,7 @@ export class BatchViewer {
       this.observer.observe(tile.el);
     }
 
-    this.status(`模型: ${filtered.length}  | 显示: ${list.length}`);
+    this.status(`模型: ${filtered.length}  | 页: ${page + 1}/${pages}  | 显示: ${list.length}`);
   }
 
   private enqueueLoad(tile: ModelTile) {

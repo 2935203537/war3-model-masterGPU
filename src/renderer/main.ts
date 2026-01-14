@@ -2,16 +2,22 @@ import { BatchViewer, type ViewerSettings } from './war3/batchViewer';
 
 const btnPick = document.getElementById('btnPick') as HTMLButtonElement;
 const btnPickMap = document.getElementById('btnPickMap') as HTMLButtonElement;
+const btnPrev = document.getElementById('btnPrev') as HTMLButtonElement;
+const btnNext = document.getElementById('btnNext') as HTMLButtonElement;
+const txtPage = document.getElementById('txtPage') as HTMLSpanElement;
 const inpLimit = document.getElementById('inpLimit') as HTMLInputElement;
-const selSize = document.getElementById('selSize') as HTMLSelectElement;
-const togAnim = document.getElementById('togAnim') as HTMLInputElement;
 const togRotate = document.getElementById('togRotate') as HTMLInputElement;
-const togParticles = document.getElementById('togParticles') as HTMLInputElement;
-const togRibbons = document.getElementById('togRibbons') as HTMLInputElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const war3StatusEl = document.getElementById('war3Status') as HTMLSpanElement;
 const inpFilter = document.getElementById('inpFilter') as HTMLInputElement;
 const grid = document.getElementById('grid') as HTMLDivElement;
+const fileList = document.getElementById('fileList') as HTMLDivElement;
+const btnSelAll = document.getElementById('btnSelAll') as HTMLButtonElement;
+const btnSelNone = document.getElementById('btnSelNone') as HTMLButtonElement;
+const btnPickOut = document.getElementById('btnPickOut') as HTMLButtonElement;
+const txtOutDir = document.getElementById('txtOutDir') as HTMLDivElement;
+const btnExportSelected = document.getElementById('btnExportSelected') as HTMLButtonElement;
+const btnExportAll = document.getElementById('btnExportAll') as HTMLButtonElement;
 
 if (!window.war3Desktop) {
   statusEl.textContent = 'Electron preload not found';
@@ -19,23 +25,25 @@ if (!window.war3Desktop) {
 }
 
 const settings: ViewerSettings = {
-  tileSize: parseInt(selSize.value, 10),
+  tileSize: 256,
   limit: parseInt(inpLimit.value, 10),
+  page: 0,
   filter: inpFilter.value,
-  animate: togAnim.checked,
+  animate: true,
   rotate: togRotate.checked,
-  particles: togParticles.checked,
-  ribbons: togRibbons.checked,
+  particles: true,
+  ribbons: true,
 };
 
 function getSettings(): ViewerSettings {
-  settings.tileSize = parseInt(selSize.value, 10);
+  settings.tileSize = 256;
   settings.limit = Math.max(1, parseInt(inpLimit.value, 10) || 1);
+  settings.page = Math.max(0, settings.page | 0);
   settings.filter = inpFilter.value || '';
-  settings.animate = togAnim.checked;
+  settings.animate = true;
   settings.rotate = togRotate.checked;
-  settings.particles = togParticles.checked;
-  settings.ribbons = togRibbons.checked;
+  settings.particles = true;
+  settings.ribbons = true;
   return settings;
 }
 
@@ -48,6 +56,53 @@ const readFile = async (abs: string): Promise<Uint8Array> => {
 };
 
 const viewer = new BatchViewer(grid, statusEl, readFile, getSettings);
+
+let exportOutDir: string | null = null;
+const selected = new Set<string>();
+
+function renderPageInfo() {
+  const info = viewer.getRenderInfo();
+  if (!info) {
+    txtPage.textContent = '0/0';
+    return;
+  }
+  txtPage.textContent = `${info.page + 1}/${info.pages}`;
+}
+
+function rebuildFileList() {
+  const list = viewer.getCurrentPageModelRels();
+  fileList.innerHTML = '';
+  for (const rel of list) {
+    const row = document.createElement('div');
+    row.className = 'file-item';
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.checked = selected.has(rel);
+    const name = document.createElement('div');
+    name.className = 'file-name';
+    name.textContent = rel;
+    row.appendChild(chk);
+    row.appendChild(name);
+
+    const toggle = (v: boolean) => {
+      if (v) selected.add(rel);
+      else selected.delete(rel);
+      chk.checked = v;
+    };
+    chk.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle(chk.checked);
+    });
+    row.addEventListener('click', () => toggle(!selected.has(rel)));
+    fileList.appendChild(row);
+  }
+}
+
+function refreshAll() {
+  viewer.refresh();
+  renderPageInfo();
+  rebuildFileList();
+}
 
 async function refreshWar3Status() {
   if (!war3StatusEl) return;
@@ -79,6 +134,7 @@ btnPick.addEventListener('click', async () => {
       return;
     }
     await viewer.setFolder(folder);
+    refreshAll();
     await refreshWar3Status();
   } catch (e: any) {
     console.error(e);
@@ -95,6 +151,7 @@ btnPickMap.addEventListener('click', async () => {
       return;
     }
     await viewer.setFolder(folder);
+    refreshAll();
     await refreshWar3Status();
   } catch (e: any) {
     console.error(e);
@@ -106,21 +163,82 @@ btnPickMap.addEventListener('click', async () => {
 refreshWar3Status();
 
 function refresh() {
-  viewer.refresh();
+  refreshAll();
 }
 
 inpLimit.addEventListener('change', refresh);
-selSize.addEventListener('change', refresh);
-togAnim.addEventListener('change', () => {/*no tile rebuild needed*/});
 togRotate.addEventListener('change', () => {/*no tile rebuild needed*/});
-togParticles.addEventListener('change', () => {/*effects applied on load*/});
-togRibbons.addEventListener('change', () => {/*effects applied on load*/});
 
 let filterTimer: number | null = null;
 inpFilter.addEventListener('input', () => {
   if (filterTimer) window.clearTimeout(filterTimer);
   filterTimer = window.setTimeout(() => {
+    settings.page = 0;
     refresh();
     filterTimer = null;
   }, 200);
+});
+
+btnPrev.addEventListener('click', () => {
+  const cur = settings.page | 0;
+  if (cur <= 0) return;
+  settings.page = cur - 1;
+  refresh();
+});
+
+btnNext.addEventListener('click', () => {
+  const info = viewer.getRenderInfo();
+  const cur = settings.page | 0;
+  if (info) {
+    if (cur >= info.pages - 1) return;
+    settings.page = cur + 1;
+    refresh();
+    return;
+  }
+  settings.page = cur + 1;
+  refresh();
+});
+
+btnSelAll.addEventListener('click', () => {
+  for (const rel of viewer.getCurrentPageModelRels()) {
+    selected.add(rel);
+  }
+  rebuildFileList();
+});
+
+btnSelNone.addEventListener('click', () => {
+  for (const rel of viewer.getCurrentPageModelRels()) {
+    selected.delete(rel);
+  }
+  rebuildFileList();
+});
+
+btnPickOut.addEventListener('click', async () => {
+  if (!window.war3Desktop) return;
+  const out = await window.war3Desktop.selectExportFolder();
+  if (!out) return;
+  exportOutDir = out;
+  txtOutDir.textContent = out;
+});
+
+btnExportSelected.addEventListener('click', async () => {
+  if (!exportOutDir) {
+    statusEl.textContent = '请先选择导出目录';
+    return;
+  }
+  const items = Array.from(selected);
+  statusEl.textContent = `导出选中: ${items.length}...`;
+  const ok = await viewer.exportModels(exportOutDir, items);
+  statusEl.textContent = ok ? `导出完成: ${items.length}` : '导出失败';
+});
+
+btnExportAll.addEventListener('click', async () => {
+  if (!exportOutDir) {
+    statusEl.textContent = '请先选择导出目录';
+    return;
+  }
+  const items = viewer.getFilteredModelRels();
+  statusEl.textContent = `导出全部: ${items.length}...`;
+  const ok = await viewer.exportModels(exportOutDir, items);
+  statusEl.textContent = ok ? `导出完成: ${items.length}` : '导出失败';
 });
