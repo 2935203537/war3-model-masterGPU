@@ -1092,9 +1092,45 @@ ipcMain.handle("fs:scanFolder", async (_evt, folderPath) => {
 
 // --- IPC：读取文件（二进制）---
 // renderer 用 ArrayBuffer 接收：new Uint8Array(buffer)
+const READ_FILE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
+let readFileCacheBytes = 0;
+// absPath -> Buffer, Map insertion order is used as LRU
+const readFileCache = new Map();
+
+function readFileCacheGet(absPath) {
+  const v = readFileCache.get(absPath);
+  if (!v) return null;
+  // refresh LRU order
+  readFileCache.delete(absPath);
+  readFileCache.set(absPath, v);
+  return v;
+}
+
+function readFileCacheSet(absPath, data) {
+  if (!data) return;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  const existed = readFileCache.get(absPath);
+  if (existed) {
+    readFileCacheBytes -= existed.length || 0;
+    readFileCache.delete(absPath);
+  }
+  readFileCache.set(absPath, buf);
+  readFileCacheBytes += buf.length || 0;
+
+  while (readFileCacheBytes > READ_FILE_CACHE_MAX_BYTES && readFileCache.size) {
+    const oldestKey = readFileCache.keys().next().value;
+    const oldestVal = readFileCache.get(oldestKey);
+    readFileCache.delete(oldestKey);
+    readFileCacheBytes -= (oldestVal?.length || 0);
+  }
+}
+
 ipcMain.handle("read-file", async (_evt, absPath) => {
   if (!absPath || typeof absPath !== "string") return null;
   try {
+    const cached = readFileCacheGet(absPath);
+    if (cached) return cached;
+
     // MPQ-backed virtual paths:
     //  - mpq:<id>:<innerPath>
     //  - mpq:auto:<innerPath> (search map MPQ then game MPQs)
@@ -1105,12 +1141,16 @@ ipcMain.handle("read-file", async (_evt, absPath) => {
 	    // 注意：某些旧版本可能会构造出 "mpq:1: <path>"（冒号后有空格）
 	    // 这里做一次 trim/normalize，避免找不到文件。
 	    const inner = String(mId[2] ?? '').trim();
-	    return await mpqReadFromChain(inner, id);
+	    const data = await mpqReadFromChain(inner, id);
+	    readFileCacheSet(absPath, data);
+	    return readFileCacheGet(absPath) || data;
       }
       const mAuto = absPath.match(/^mpq:auto:(.*)$/);
       if (mAuto) {
 	    const inner = String(mAuto[1] ?? '').trim();
-        return await mpqReadFromChain(inner, null);
+	    const data = await mpqReadFromChain(inner, null);
+	    readFileCacheSet(absPath, data);
+	    return readFileCacheGet(absPath) || data;
       }
       // Unknown mpq scheme
       return null;
@@ -1118,6 +1158,8 @@ ipcMain.handle("read-file", async (_evt, absPath) => {
 
     const data = await fs.promises.readFile(absPath);
     // Electron 会把 Buffer 序列化成可传输的 Uint8Array/ArrayBuffer
+
+    readFileCacheSet(absPath, data);
     return data;
   } catch (e) {
     // Propagate rich error to renderer (ipcRenderer.invoke will reject), so the UI shows the real reason.

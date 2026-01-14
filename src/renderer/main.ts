@@ -49,12 +49,44 @@ function getSettings(): ViewerSettings {
   return settings;
 }
 
+const READ_FILE_CACHE_MAX_BYTES = 256 * 1024 * 1024;
+let readFileCacheBytes = 0;
+const readFileCache = new Map<string, Uint8Array>();
+
+function readFileCacheGet(abs: string): Uint8Array | null {
+  const v = readFileCache.get(abs);
+  if (!v) return null;
+  readFileCache.delete(abs);
+  readFileCache.set(abs, v);
+  return v;
+}
+
+function readFileCacheSet(abs: string, bytes: Uint8Array): void {
+  const existed = readFileCache.get(abs);
+  if (existed) {
+    readFileCacheBytes -= existed.byteLength || 0;
+    readFileCache.delete(abs);
+  }
+  readFileCache.set(abs, bytes);
+  readFileCacheBytes += bytes.byteLength || 0;
+  while (readFileCacheBytes > READ_FILE_CACHE_MAX_BYTES && readFileCache.size) {
+    const oldestKey = readFileCache.keys().next().value as string;
+    const oldestVal = readFileCache.get(oldestKey);
+    readFileCache.delete(oldestKey);
+    readFileCacheBytes -= oldestVal?.byteLength || 0;
+  }
+}
+
 const readFile = async (abs: string): Promise<Uint8Array> => {
+  const cached = readFileCacheGet(abs);
+  if (cached) return cached;
   const data = await window.war3Desktop.readFile(abs);
   if (!data) {
     throw new Error(`readFile failed: ${abs}`);
   }
-  return data instanceof Uint8Array ? data : new Uint8Array(data as any);
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data as any);
+  readFileCacheSet(abs, bytes);
+  return bytes;
 };
 
 const viewer = new BatchViewer(grid, statusEl, readFile, getSettings);

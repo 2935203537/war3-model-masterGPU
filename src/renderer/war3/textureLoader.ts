@@ -5,6 +5,35 @@ import { decodeTGA } from './tga';
 
 const CLEANUP_NAME_REGEXP = /^(?:.*\\|.*\/)?([^\\/]+)$/;
 
+const DECODE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
+let decodeCacheBytes = 0;
+// key -> { bytes: number, kind, payload }
+const decodeCache = new Map<string, { bytes: number; kind: 'mipmaps' | 'image' | 'gpuCompressed'; payload: any }>();
+
+function decodeCacheGet(key: string) {
+  const v = decodeCache.get(key);
+  if (!v) return null;
+  decodeCache.delete(key);
+  decodeCache.set(key, v);
+  return v;
+}
+
+function decodeCacheSet(key: string, entry: { bytes: number; kind: 'mipmaps' | 'image' | 'gpuCompressed'; payload: any }) {
+  const existed = decodeCache.get(key);
+  if (existed) {
+    decodeCacheBytes -= existed.bytes;
+    decodeCache.delete(key);
+  }
+  decodeCache.set(key, entry);
+  decodeCacheBytes += entry.bytes;
+  while (decodeCacheBytes > DECODE_CACHE_MAX_BYTES && decodeCache.size) {
+    const oldestKey = decodeCache.keys().next().value as string;
+    const oldestVal = decodeCache.get(oldestKey);
+    decodeCache.delete(oldestKey);
+    decodeCacheBytes -= oldestVal?.bytes || 0;
+  }
+}
+
 export type FileIndex = {
   root: string;
   byRelLower: Map<string, string>; // rel(lower) => abs
@@ -79,6 +108,24 @@ export async function loadTextureIntoRenderer(
   bytes: Uint8Array,
   support: TextureSupport,
 ): Promise<void> {
+  const cacheKey = `${absPath}|gpuBC:${support.hasGPUBC ? 1 : 0}`;
+  const cached = decodeCacheGet(cacheKey);
+  if (cached) {
+    if (cached.kind === 'mipmaps') {
+      renderer.setTextureImageData(textureImage, cached.payload);
+      return;
+    }
+    if (cached.kind === 'image') {
+      renderer.setTextureImageData(textureImage, [cached.payload]);
+      return;
+    }
+    if (cached.kind === 'gpuCompressed' && (renderer as any).setGPUTextureCompressedImage) {
+      const { gpuFormat, array, dds } = cached.payload;
+      (renderer as any).setGPUTextureCompressedImage(textureImage, gpuFormat, array, dds);
+      return;
+    }
+  }
+
   const lower = absPath.toLowerCase();
   if (lower.endsWith('.blp')) {
     const blp = decodeBLP(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
@@ -98,7 +145,13 @@ export async function loadTextureIntoRenderer(
       }
     }
 
-    renderer.setTextureImageData(textureImage, mipmaps.length ? mipmaps : makeFallbackMipmaps());
+    const out = mipmaps.length ? mipmaps : makeFallbackMipmaps();
+    decodeCacheSet(cacheKey, {
+      bytes: (bytes.byteLength || 0),
+      kind: 'mipmaps',
+      payload: out,
+    });
+    renderer.setTextureImageData(textureImage, out);
     return;
   }
 
@@ -116,6 +169,11 @@ export async function loadTextureIntoRenderer(
 
     if (gpuFormat && (renderer as any).setGPUTextureCompressedImage) {
       (renderer as any).setGPUTextureCompressedImage(textureImage, gpuFormat, array, dds);
+      decodeCacheSet(cacheKey, {
+        bytes: (bytes.byteLength || 0),
+        kind: 'gpuCompressed',
+        payload: { gpuFormat, array, dds },
+      });
       return;
     }
 
@@ -129,12 +187,22 @@ export async function loadTextureIntoRenderer(
         return new ImageData(new Uint8ClampedArray(rgba), img.shape.width, img.shape.height);
       });
 
+    decodeCacheSet(cacheKey, {
+      bytes: (bytes.byteLength || 0),
+      kind: 'mipmaps',
+      payload: images,
+    });
     renderer.setTextureImageData(textureImage, images);
     return;
   }
 
   if (lower.endsWith('.tga')) {
     const img = decodeTGA(bytes);
+    decodeCacheSet(cacheKey, {
+      bytes: (bytes.byteLength || 0),
+      kind: 'image',
+      payload: img,
+    });
     renderer.setTextureImageData(textureImage, [img]);
     return;
   }
