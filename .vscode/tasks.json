@@ -1,0 +1,58 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "安装依赖（跳过 Electron）",
+      "type": "shell",
+      "command": "npm config set registry https://registry.npmmirror.com; npm install --ignore-scripts",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "安装 Electron（重试3次）",
+      "type": "shell",
+      "command": "$env:ELECTRON_MIRROR='https://cdn.npmmirror.com/binaries/electron/'; $retries = 3; $success = $false; while ($retries -gt 0 -and -not $success) { Write-Host \"尝试安装 Electron (剩余 $retries 次)...\"; npm install electron --save-dev 2>&1 | Tee-Object -Variable output; if ($LASTEXITCODE -eq 0) { $success = $true; Write-Host '成功安装 Electron!' -ForegroundColor Green } else { $retries--; if ($retries -gt 0) { Write-Host '安装失败，等待5秒后重试...' -ForegroundColor Yellow; Start-Sleep -Seconds 5 } } }; if (-not $success) { Write-Host 'Electron 安装失败，请检查网络连接' -ForegroundColor Red }",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "完整安装（推荐）",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "安装依赖（跳过 Electron）",
+        "安装 Electron（重试3次）"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
+    },
+    {
+      "label": "运行项目",
+      "dependsOrder": "sequence",
+      "type": "shell",
+      "command": "npm run dev",
+      "problemMatcher": [],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+  ]
+}

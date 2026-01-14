@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "lib": ["ES2020"],
+    "types": ["node"],
+    "strict": false,
+    "declaration": false,
+    "sourceMap": false,
+    "outDir": "./mpq_cjs",
+    "rootDir": "./mpq_ts",
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "include": ["mpq_ts/**/*.ts"]
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>War3 Model Desktop Viewer (WebGPU)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="left">
+      <button id="btnPick" class="btn">选择文件夹</button>
+      <button id="btnPickMap" class="btn">打开W3X/W3M</button>
+      <div class="field">
+        <label>加载数量</label>
+        <input id="inpLimit" type="number" min="1" value="50" />
+      </div>
+      <div class="field">
+        <label>Tile</label>
+        <select id="selSize">
+          <option value="128">128</option>
+          <option value="192">192</option>
+          <option value="256" selected>256</option>
+          <option value="320">320</option>
+        </select>
+      </div>
+      <label class="toggle"><input id="togAnim" type="checkbox" checked />动画</label>
+      <label class="toggle"><input id="togRotate" type="checkbox" checked />旋转</label>
+      <label class="toggle"><input id="togParticles" type="checkbox" />粒子</label>
+      <label class="toggle"><input id="togRibbons" type="checkbox" />飘带</label>
+      <span id="status" class="status">未选择文件夹</span>
+    </div>
+    <div class="right">
+      <input id="inpFilter" class="search" placeholder="过滤（输入关键字）" />
+      <span id="war3Status" class="status">War3: 未检测</span>
+    </div>
+  </header>
+
+  <main class="content">
+    <div id="grid" class="grid"></div>
+  </main>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
