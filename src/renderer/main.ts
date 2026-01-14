@@ -8,6 +8,8 @@ const txtPage = document.getElementById('txtPage') as HTMLSpanElement;
 const inpJump = document.getElementById('inpJump') as HTMLInputElement;
 const btnJump = document.getElementById('btnJump') as HTMLButtonElement;
 const inpLimit = document.getElementById('inpLimit') as HTMLInputElement;
+const selAnim = document.getElementById('selAnim') as HTMLSelectElement;
+const chkLoop = document.getElementById('chkLoop') as HTMLInputElement;
 const togRotate = document.getElementById('togRotate') as HTMLInputElement;
 const statusEl = document.getElementById('status') as HTMLSpanElement;
 const war3StatusEl = document.getElementById('war3Status') as HTMLSpanElement;
@@ -32,6 +34,8 @@ const settings: ViewerSettings = {
   page: 0,
   filter: inpFilter.value,
   animate: true,
+  animName: selAnim?.value || 'stand',
+  loop: !!chkLoop?.checked,
   rotate: togRotate.checked,
   particles: true,
   ribbons: true,
@@ -43,6 +47,8 @@ function getSettings(): ViewerSettings {
   settings.page = Math.max(0, settings.page | 0);
   settings.filter = inpFilter.value || '';
   settings.animate = true;
+  settings.animName = selAnim?.value || 'stand';
+  settings.loop = !!chkLoop?.checked;
   settings.rotate = togRotate.checked;
   settings.particles = true;
   settings.ribbons = true;
@@ -211,6 +217,13 @@ function refresh() {
 }
 
 inpLimit.addEventListener('change', refresh);
+selAnim.addEventListener('change', () => {
+  settings.animName = selAnim.value || 'stand';
+  viewer.setGlobalAnimation(settings.animName);
+});
+chkLoop.addEventListener('change', () => {
+  settings.loop = chkLoop.checked;
+});
 togRotate.addEventListener('change', () => {/*no tile rebuild needed*/});
 
 let filterTimer: number | null = null;

@@ -10,6 +10,25 @@ function fallbackMipmaps(): any[] {
   return [typeof ImageData !== 'undefined' ? new ImageData(data, 1, 1) : { width: 1, height: 1, data, colorSpace: 'srgb' }];
 }
 
+function findSequenceIndexByName(model: Model | null, animName: string): number {
+  if (!model?.Sequences?.length) return 0;
+  const name = (animName || '').toLowerCase().trim();
+  if (!name) return 0;
+  const map: Record<string, (n: string) => boolean> = {
+    stand: (n) => n.includes('stand') || n.includes('idle'),
+    walk: (n) => n.includes('walk'),
+    attack: (n) => n.includes('attack'),
+    death: (n) => n.includes('death'),
+    birth: (n) => n.includes('birth'),
+  };
+  const matcher = map[name];
+  if (matcher) {
+    const idx = model.Sequences.findIndex(seq => matcher((seq?.Name || '').toLowerCase()));
+    if (idx >= 0) return idx;
+  }
+  return 0;
+}
+
 function isMDXBytes(bytes: Uint8Array): boolean {
   return bytes.length >= 4 &&
     bytes[0] === 0x4d &&
@@ -90,6 +109,7 @@ function ensureModelHasSequence(model: any): void {
   } else {
     s0.Interval = new Uint32Array([0, 1]);
   }
+
 }
 
 type FolderData = {
@@ -104,6 +124,8 @@ export type ViewerSettings = {
   page: number;
   filter: string;
   animate: boolean;
+  animName: string;
+  loop: boolean;
   rotate: boolean;
   particles: boolean;
   ribbons: boolean;
@@ -239,7 +261,10 @@ class ModelTile {
       renderer.setEffectsEnabled({ particles: true, ribbons: true });
       renderer.setTeamColor(vec3.fromValues(1, 0, 0));
       if (model.Sequences?.length) {
-        renderer.setSequence(0);
+        const seqIdx = findSequenceIndexByName(model, this.getSettings().animName);
+        renderer.setSequence(seqIdx);
+        const seq = model.Sequences[seqIdx];
+        if (seq?.Interval?.length) renderer.setFrame(seq.Interval[0]);
       }
 
       await renderer.initGPUDevice(this.canvas, this.gpu.device, ctx);
@@ -378,7 +403,17 @@ class ModelTile {
 
     try {
       if (s.animate && this.model.Sequences?.length) {
-        this.renderer.update(dt);
+        if (!s.loop) {
+          const seqIndex = (this.renderer as any).getSequence?.() ?? 0;
+          const seq = this.model.Sequences[seqIndex];
+          const end = seq?.Interval?.[1];
+          const frame = (this.renderer as any).getFrame?.() ?? 0;
+          if (!(typeof end === 'number' && frame >= end)) {
+            this.renderer.update(dt);
+          }
+        } else {
+          this.renderer.update(dt);
+        }
       }
 
       this.renderer.render(mvMatrix, pMatrix, {
@@ -397,6 +432,16 @@ class ModelTile {
       hint.className = 'hint';
       hint.textContent = `Error: ${String((e as any)?.message || e)}`;
       this.el.appendChild(hint);
+    }
+  }
+
+  applyAnimation(animName: string) {
+    if (!this.model || !this.renderer) return;
+    const seqIdx = findSequenceIndexByName(this.model, animName);
+    this.renderer.setSequence(seqIdx);
+    const seq = this.model.Sequences?.[seqIdx];
+    if (seq?.Interval?.length) {
+      this.renderer.setFrame(seq.Interval[0]);
     }
   }
 }
@@ -1004,6 +1049,12 @@ export class BatchViewer {
     }
     requestAnimationFrame(this.loop);
   };
+
+  public setGlobalAnimation(animName: string) {
+    for (const tile of this.tiles) {
+      tile.applyAnimation(animName);
+    }
+  }
 
   async setFolder(folder: FolderData) {
     this.folder = folder;
