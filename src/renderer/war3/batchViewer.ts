@@ -163,7 +163,6 @@ class ModelTile {
 
   private renderer: ModelRenderer | null = null;
   private model: Model | null = null;
-  private lastTime = 0;
   private theta = 0;
   private cameraDistance = 600;
   private center = vec3.create();
@@ -344,17 +343,11 @@ class ModelTile {
     await Promise.all(promises);
   }
 
-  tick(now: number) {
+  tick(_now: number, dt: number) {
     if (!this.visible || !this.loaded || !this.renderer || !this.model) return;
 
     const s = this.getSettings();
     this.renderer.setEffectsEnabled({ particles: true, ribbons: true });
-
-
-    // Throttle thumbnails to ~15 FPS to keep batch views responsive.
-    if (this.lastTime && now - this.lastTime < 66) return;
-    const dt = this.lastTime ? (now - this.lastTime) : 16;
-    this.lastTime = now;
 
     if (s.rotate) {
       this.theta += dt * 0.0007;
@@ -587,11 +580,11 @@ class SingleModelViewer {
       if (this.dragButton === 0) {
         // Left button: yaw (left/right) and pitch (up/down)
         this.theta -= dx * 0.01;
-        this.phi = Math.max(-1.5, Math.min(1.5, this.phi - dy * 0.01));
+        this.phi = Math.max(-1.5, Math.min(1.5, this.phi + dy * 0.01));
       } else if (this.dragButton === 2) {
         // Right button: pan Y (left/right) and pan Z (up/down, vertical screen movement)
         const panScale = this.distance * 0.002;
-        this.panY += dx * panScale;
+        this.panY -= dx * panScale;
         this.panZ += dy * panScale;
       }
     });
@@ -998,9 +991,16 @@ export class BatchViewer {
     requestAnimationFrame(this.loop);
   }
 
+  private lastLoopTime = 0;
+
   private loop = (now: number) => {
+    const dt = this.lastLoopTime ? (now - this.lastLoopTime) : 16;
+    this.lastLoopTime = now;
+
     for (const tile of this.tiles) {
-      tile.tick(now);
+      if (tile.visible) {
+        tile.tick(now, dt);
+      }
     }
     requestAnimationFrame(this.loop);
   };
