@@ -152,7 +152,7 @@ const GPU_LAYER_PROPS: [string, GPUBlendState, GPUDepthStencilState][] = [['none
 }], ['additive', {
     color: {
         operation: 'add',
-        srcFactor: 'src-alpha',
+        srcFactor: 'src',
         dstFactor: 'one'
     },
     alpha: {
@@ -1284,7 +1284,7 @@ export class ModelRenderer {
                             geosetAlpha: new Float32Array(FSUniformsValues, 92, 1),
                         };
                         FSUniformsViews.replaceableColor.set(this.rendererData.teamColor);
-                        FSUniformsViews.replaceableType.set([texture.ReplaceableId || 0]);
+                        FSUniformsViews.replaceableType.set([texture.Image ? 0 : (texture.ReplaceableId || 0)]);
                         FSUniformsViews.discardAlphaLevel.set([layer.FilterMode === FilterMode.Transparent ? .75 : 0]);
                         FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(0, 3));
                         FSUniformsViews.tVertexAnim.set(tVetexAnim.slice(3, 6), 4);
@@ -3954,10 +3954,10 @@ export class ModelRenderer {
         }
 
         if (typeof baseLayer.TVertexAnimId === 'number') {
-            const anim: TVertexAnim = this.rendererData.model.TextureAnims[baseLayer.TVertexAnimId];
-            const translationRes = this.interp.vec3(translation, anim.Translation);
-            const rotationRes = this.interp.quat(rotation, anim.Rotation);
-            const scalingRes = this.interp.vec3(scaling, anim.Scaling);
+            const anim: TVertexAnim | undefined = this.rendererData.model.TextureAnims?.[baseLayer.TVertexAnimId];
+            const translationRes = anim?.Translation ? this.interp.vec3(translation, anim.Translation) : null;
+            const rotationRes = anim?.Rotation ? this.interp.quat(rotation, anim.Rotation) : null;
+            const scalingRes = anim?.Scaling ? this.interp.vec3(scaling, anim.Scaling) : null;
             mat4.fromRotationTranslationScale(
                 texCoordMat4,
                 rotationRes || defaultRotation,

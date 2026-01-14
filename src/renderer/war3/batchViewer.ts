@@ -29,6 +29,21 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || n;
 }
 
+function dirNameAbs(p: string): string {
+  const n = (p || '').replace(/\\/g, '/');
+  const parts = n.split('/');
+  parts.pop();
+  return parts.join('/');
+}
+
+function joinAbs(dir: string, rel: string): string {
+  const d = (dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const r = (rel || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!d) return r;
+  if (!r) return d;
+  return `${d}/${r}`;
+}
+
 function ensureModelHasSequence(model: any): void {
   if (!model) return;
   if (!Array.isArray(model.Sequences)) {
@@ -275,6 +290,17 @@ class ModelTile {
     const support = { hasGPUBC: this.gpu.hasGPUBC };
     const promises: Promise<void>[] = [];
 
+    const modelDir = dirNameAbs(this.modelAbs);
+
+    const WAR3_NATIVE_PREFIXES = [
+      'textures/', 'replaceabletextures/', 'abilities/', 'buildings/',
+      'doodads/', 'ui/', 'units/', 'environment/', 'splats/',
+    ];
+    function isWar3NativePath(p: string): boolean {
+      const lower = (p || '').replace(/\\/g, '/').toLowerCase();
+      return WAR3_NATIVE_PREFIXES.some(prefix => lower.startsWith(prefix));
+    }
+
     for (const tex of model.Textures || []) {
       if (!tex?.Image) continue;
       const abs = resolveTextureAbs(tex.Image, this.modelAbs, this.idx);
@@ -285,11 +311,31 @@ class ModelTile {
       }
       promises.push((async () => {
         try {
+          const img = (tex.Image || '').trim();
+          const imgNorm = img.replace(/\\/g, '/');
+          const isAbs = /^[a-zA-Z]:[\\/]/.test(img) || imgNorm.startsWith('/');
+          const isNative = isWar3NativePath(imgNorm);
+
+          if (abs.startsWith('mpq:auto:')) {
+            if (!isNative && !isAbs) {
+              const candidates: string[] = [];
+              candidates.push(joinAbs(modelDir, imgNorm));
+              const bn = baseName(imgNorm);
+              if (bn && bn !== imgNorm) candidates.push(joinAbs(modelDir, bn));
+              for (const cand of candidates) {
+                try {
+                  const data = await this.readFile(cand);
+                  await loadTextureIntoRenderer(renderer, tex.Image, cand, data, support);
+                  return;
+                } catch {}
+              }
+            }
+          }
+
           const data = await this.readFile(abs);
           await loadTextureIntoRenderer(renderer, tex.Image, abs, data, support);
         } catch (err) {
           console.warn('[tex-read-fail]', tex.Image, 'abs', abs, err);
-          // Avoid cascading failures: bind a 1x1 transparent texture as fallback.
           try { renderer.setTextureImageData(tex.Image, fallbackMipmaps()); } catch {}
         }
       })());
@@ -396,9 +442,21 @@ class SingleModelViewer {
   private theta = 0;
   private phi = 0.45;
   private distance = 600;
+  private panX = 0;
+  private panY = 0;
+  private panZ = 0;
   private dragging = false;
+  private dragButton = 0;
   private lastX = 0;
   private lastY = 0;
+
+  // default values for reset
+  private defaultTheta = 0;
+  private defaultPhi = 0.45;
+  private defaultDistance = 600;
+  private defaultPanX = 0;
+  private defaultPanY = 0;
+  private defaultPanZ = 0;
 
   // team palette (War3-style)
   private readonly teamColors: vec3[] = [
@@ -427,7 +485,7 @@ class SingleModelViewer {
         <div class="single-left">
           <div class="single-canvas-wrap">
             <canvas class="single-canvas" width="960" height="720"></canvas>
-            <div class="single-hint">拖动：旋转  |  滚轮：缩放  |  ESC：关闭</div>
+            <div class="single-hint">左键：旋转  |  右键：平移  |  滚轮：缩放  |  双击：重置  |  ESC：关闭</div>
           </div>
         </div>
         <div class="single-right">
@@ -511,9 +569,11 @@ class SingleModelViewer {
       if (this.overlay.style.display !== 'none' && e.key === 'Escape') this.close();
     });
 
-    // mouse orbit
+    // mouse orbit & pan
+    this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     this.canvas.addEventListener('pointerdown', (e) => {
       this.dragging = true;
+      this.dragButton = e.button;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -524,8 +584,16 @@ class SingleModelViewer {
       const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
-      this.theta += dx * 0.01;
-      this.phi = Math.max(-1.2, Math.min(1.2, this.phi + dy * 0.01));
+      if (this.dragButton === 0) {
+        // Left button: yaw (left/right) and pitch (up/down)
+        this.theta -= dx * 0.01;
+        this.phi = Math.max(-1.5, Math.min(1.5, this.phi - dy * 0.01));
+      } else if (this.dragButton === 2) {
+        // Right button: pan Y (left/right) and pan Z (up/down, vertical screen movement)
+        const panScale = this.distance * 0.002;
+        this.panY += dx * panScale;
+        this.panZ += dy * panScale;
+      }
     });
     this.canvas.addEventListener('pointerup', () => { this.dragging = false; });
     this.canvas.addEventListener('pointercancel', () => { this.dragging = false; });
@@ -534,6 +602,15 @@ class SingleModelViewer {
       const k = Math.exp(e.deltaY * 0.001);
       this.distance = Math.max(10, Math.min(50000, this.distance * k));
     }, { passive: false });
+    // Double-click to reset camera
+    this.canvas.addEventListener('dblclick', () => {
+      this.theta = this.defaultTheta;
+      this.phi = this.defaultPhi;
+      this.distance = this.defaultDistance;
+      this.panX = this.defaultPanX;
+      this.panY = this.defaultPanY;
+      this.panZ = this.defaultPanZ;
+    });
 
     this.selAnim.addEventListener('change', () => {
       if (!this.renderer) return;
@@ -683,6 +760,17 @@ class SingleModelViewer {
     }
     this.theta = 0;
     this.phi = 0.45;
+    this.panX = 0;
+    this.panY = 0;
+    this.panZ = 0;
+
+    // Save default values for reset
+    this.defaultTheta = this.theta;
+    this.defaultPhi = this.phi;
+    this.defaultDistance = this.distance;
+    this.defaultPanX = this.panX;
+    this.defaultPanY = this.panY;
+    this.defaultPanZ = this.panZ;
   }
 
   async open(modelAbs: string, idx: FileIndex, gpu: GPUShared) {
@@ -805,8 +893,10 @@ class SingleModelViewer {
     const aspect = this.canvas.width / this.canvas.height;
     mat4.perspective(pMatrix, Math.PI / 4, aspect, 0.1, 50000);
 
-    // spherical camera
-    const cx = this.center[0], cy = this.center[1], cz = this.center[2];
+    // spherical camera with pan offset
+    const cx = this.center[0] + this.panX;
+    const cy = this.center[1] + this.panY;
+    const cz = this.center[2] + this.panZ;
     const r = this.distance;
     const cosPhi = Math.cos(this.phi);
     vec3.set(
@@ -815,7 +905,7 @@ class SingleModelViewer {
       cy + Math.sin(this.theta) * cosPhi * r,
       cz + Math.sin(this.phi) * r
     );
-    vec3.copy(cameraTarget, this.center);
+    vec3.set(cameraTarget, cx, cy, cz);
 
     mat4.lookAt(mvMatrix, cameraPos, cameraTarget, cameraUp);
     const camQuat = calcCameraQuat(cameraPos, cameraTarget);

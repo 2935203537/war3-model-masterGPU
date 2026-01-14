@@ -107,7 +107,6 @@ function refreshAll() {
   renderPageInfo();
   rebuildFileList();
 
-  // UX: when changing page/filter/jump, always show the top-most models.
   try {
     const main = document.querySelector('.main') as HTMLElement | null;
     if (main) main.scrollTop = 0;
