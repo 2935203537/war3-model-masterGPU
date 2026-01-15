@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 
 // MPQ reader (ported from vscode-plugin-blp-preview-main, no native dependency)
 const require = createRequire(import.meta.url);
-const MpqArchive = require('./mpq_cjs/archive').default;
+let koffi = null;
 
 function isDev() {
   // 最稳：没打包就认为是 dev
@@ -43,7 +43,249 @@ function sha1(s) {
   return crypto.createHash('sha1').update(s).digest('hex');
 }
 
-// MPQ reading is handled by the built-in JS MPQ reader (mpq_cjs/archive).
+const STORMLIB_READ_ONLY = 0x00000100;
+const STORMLIB_OPEN_FROM_MPQ = 0x00000000;
+
+let _stormApi = null;
+let _stormInitError = null;
+
+const stormState = {
+  archiveByPath: new Map(),
+  gameSig: '',
+  gameHandle: null,
+  gameBasePath: null,
+  gameAttached: [],
+  gameLeftovers: [],
+};
+
+function getStormLibDllPath() {
+  const envPath = process.env['STORMLIB_PATH'];
+  if (envPath && typeof envPath === 'string' && fs.existsSync(envPath)) return envPath;
+  const devPath = path.join(__dirname, 'native', 'win32', 'StormLib.dll');
+  if (fs.existsSync(devPath)) return devPath;
+  try {
+    if (process.resourcesPath) {
+      const resPath = path.join(process.resourcesPath, 'StormLib.dll');
+      if (fs.existsSync(resPath)) return resPath;
+    }
+  } catch {}
+  return null;
+}
+
+function ensureStormApi() {
+  if (_stormApi) return _stormApi;
+  if (_stormInitError) throw _stormInitError;
+  if (process.platform !== 'win32') {
+    _stormInitError = new Error('StormLib backend requires Windows (win32).');
+    throw _stormInitError;
+  }
+
+  if (!koffi) {
+    try {
+      koffi = require('koffi');
+    } catch (e) {
+      const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+      _stormInitError = new Error("Cannot find module 'koffi'. Please run `npm install`. " + msg);
+      throw _stormInitError;
+    }
+  }
+
+  const dllPath = getStormLibDllPath();
+  if (!dllPath) {
+    _stormInitError = new Error('StormLib.dll not found. Expected at native/win32/StormLib.dll or via STORMLIB_PATH.');
+    throw _stormInitError;
+  }
+
+  try {
+    const storm = koffi.load(dllPath);
+    const MPQHANDLE = koffi.pointer('MPQHANDLE', koffi.opaque());
+    const FILEHANDLE = koffi.pointer('FILEHANDLE', koffi.opaque());
+
+    const SFileOpenArchiveW = storm.func('bool __stdcall SFileOpenArchive(str16 mpqName, uint32 priority, uint32 flags, _Out_ MPQHANDLE *phMpq)');
+    const SFileOpenArchiveA = storm.func('bool __stdcall SFileOpenArchive(str mpqName, uint32 priority, uint32 flags, _Out_ MPQHANDLE *phMpq)');
+    const SFileCloseArchive = storm.func('bool __stdcall SFileCloseArchive(MPQHANDLE hMpq)');
+
+    let SFileOpenPatchArchiveW = null;
+    let SFileOpenPatchArchiveA = null;
+    try { SFileOpenPatchArchiveW = storm.func('bool __stdcall SFileOpenPatchArchive(MPQHANDLE hMpq, str16 patchMpqName, str16 patchPrefix, uint32 flags)'); } catch {}
+    try { SFileOpenPatchArchiveA = storm.func('bool __stdcall SFileOpenPatchArchive(MPQHANDLE hMpq, str patchMpqName, str patchPrefix, uint32 flags)'); } catch {}
+
+    const SFileOpenFileEx = storm.func('bool __stdcall SFileOpenFileEx(MPQHANDLE hMpq, str fileName, uint32 scope, _Out_ FILEHANDLE *phFile)');
+    const SFileCloseFile = storm.func('bool __stdcall SFileCloseFile(FILEHANDLE hFile)');
+    const SFileGetFileSize = storm.func('uint32 __stdcall SFileGetFileSize(FILEHANDLE hFile, _Out_ uint32 *pdwFileSizeHigh)');
+    const SFileReadFile = storm.func('bool __stdcall SFileReadFile(FILEHANDLE hFile, void *buffer, uint32 bytesToRead, _Out_ uint32 *bytesRead, void *overlapped)');
+
+    _stormApi = {
+      dllPath,
+      SFileOpenArchiveW,
+      SFileOpenArchiveA,
+      SFileCloseArchive,
+      SFileOpenPatchArchiveW,
+      SFileOpenPatchArchiveA,
+      SFileOpenFileEx,
+      SFileCloseFile,
+      SFileGetFileSize,
+      SFileReadFile,
+    };
+
+    app.on('will-quit', () => {
+      try {
+        for (const h of stormState.archiveByPath.values()) {
+          try { _stormApi.SFileCloseArchive(h); } catch {}
+        }
+        stormState.archiveByPath.clear();
+        if (stormState.gameHandle) {
+          try { _stormApi.SFileCloseArchive(stormState.gameHandle); } catch {}
+          stormState.gameHandle = null;
+        }
+      } catch {}
+    });
+
+    return _stormApi;
+  } catch (e) {
+    const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+    _stormInitError = new Error('Failed to load StormLib via koffi: ' + msg);
+    throw _stormInitError;
+  }
+}
+
+function stormInvalidateGameChain() {
+  try {
+    if (_stormApi && stormState.gameHandle) {
+      try { _stormApi.SFileCloseArchive(stormState.gameHandle); } catch {}
+    }
+  } finally {
+    stormState.gameSig = '';
+    stormState.gameHandle = null;
+    stormState.gameBasePath = null;
+    stormState.gameAttached = [];
+    stormState.gameLeftovers = [];
+  }
+}
+
+function stormOpenArchiveCached(mpqPath) {
+  const api = ensureStormApi();
+  const abs = path.resolve(mpqPath);
+  const key = abs.toLowerCase();
+  const cached = stormState.archiveByPath.get(key);
+  if (cached) return cached;
+
+  const out = [null];
+  let ok = false;
+  try { ok = api.SFileOpenArchiveW(abs, 0, STORMLIB_READ_ONLY, out); } catch { ok = false; }
+  if (!ok) {
+    ok = api.SFileOpenArchiveA(abs, 0, STORMLIB_READ_ONLY, out);
+  }
+  if (!ok || !out[0]) {
+    const err = new Error('SFileOpenArchive failed: ' + abs);
+    err.code = 'ENOENT';
+    throw err;
+  }
+  stormState.archiveByPath.set(key, out[0]);
+  return out[0];
+}
+
+function normalizeMpqInnerPath(p) {
+  if (!p || typeof p !== 'string') return '';
+  let s = p.trim();
+  s = s.replace(/^mpq:(?:auto|\d+):/i, '');
+  s = s.replace(/^[\\/]+/, '');
+  s = s.replace(/\\/g, '/');
+  s = s.replace(/\/{2,}/g, '/');
+  s = s.replace(/\//g, '\\');
+  return s;
+}
+
+function stormReadFileFromHandle(hMpq, innerPath) {
+  const api = ensureStormApi();
+  const hFile = [null];
+  if (!api.SFileOpenFileEx(hMpq, innerPath, STORMLIB_OPEN_FROM_MPQ, hFile) || !hFile[0]) {
+    return null;
+  }
+  try {
+    const hi = [0];
+    const lo = api.SFileGetFileSize(hFile[0], hi) >>> 0;
+    if (lo === 0xFFFFFFFF) return null;
+    const size = lo;
+    const buf = Buffer.allocUnsafe(size);
+    const bytesRead = [0];
+    const ok = api.SFileReadFile(hFile[0], buf, size, bytesRead, null);
+    if (!ok) return null;
+    const got = bytesRead[0] >>> 0;
+    return got === size ? buf : buf.subarray(0, got);
+  } finally {
+    try { api.SFileCloseFile(hFile[0]); } catch {}
+  }
+}
+
+function stormEnsureGameChain() {
+  const api = ensureStormApi();
+  const sig = (mpqState.gameMpqs || []).map(p => String(p).toLowerCase()).join('|');
+  if (stormState.gameHandle && stormState.gameSig === sig) return stormState.gameHandle;
+
+  stormInvalidateGameChain();
+  stormState.gameSig = sig;
+
+  if (!mpqState.gameMpqs || mpqState.gameMpqs.length === 0) return null;
+
+  const list = mpqState.gameMpqs.slice();
+  const pickByBase = (name) => list.find(p => path.basename(p).toLowerCase() === name);
+  let basePath = pickByBase('war3.mpq') || pickByBase('war3x.mpq');
+  if (!basePath) {
+    basePath = list.find(p => {
+      const n = path.basename(p).toLowerCase();
+      return !n.includes('patch') && !n.includes('local');
+    }) || list[0];
+  }
+
+  const hBase = stormOpenArchiveCached(basePath);
+  stormState.gameBasePath = basePath;
+  stormState.gameHandle = hBase;
+
+  const attached = [];
+  const leftovers = [];
+
+  for (const p of list) {
+    if (!p || String(p).toLowerCase() === String(basePath).toLowerCase()) continue;
+    const abs = path.resolve(p);
+    let ok = false;
+    if (api.SFileOpenPatchArchiveW) {
+      try { ok = api.SFileOpenPatchArchiveW(hBase, abs, '', 0); } catch { ok = false; }
+    }
+    if (!ok && api.SFileOpenPatchArchiveA) {
+      try { ok = api.SFileOpenPatchArchiveA(hBase, abs, '', 0); } catch { ok = false; }
+    }
+    if (ok) attached.push(abs);
+    else leftovers.push(abs);
+  }
+
+  stormState.gameAttached = attached;
+  stormState.gameLeftovers = leftovers;
+  return hBase;
+}
+
+async function stormReadFromGameChainCached(innerPath) {
+  const hGame = stormEnsureGameChain();
+  if (!hGame) return null;
+
+  const cacheRoot = path.join(app.getPath('userData'), 'mpq_cache');
+  const norm = normalizeMpqInnerPath(innerPath);
+  const key = sha1('stormlib-game|' + stormState.gameSig + '|' + String(norm || '').toLowerCase());
+  const out = path.join(cacheRoot, key);
+
+  try {
+    if (fs.existsSync(out)) {
+      return await fs.promises.readFile(out);
+    }
+    await fs.promises.mkdir(cacheRoot, { recursive: true });
+    const buf = stormReadFileFromHandle(hGame, norm);
+    if (!buf) return null;
+    await fs.promises.writeFile(out, buf);
+    return buf;
+  } catch {
+    return null;
+  }
+}
 
 function hasRequiredMpqs(dir) {
   if (!dir) return false;
@@ -274,26 +516,27 @@ function refreshGameMpqList() {
   });
 
   mpqState.gameMpqs = list;
+
+  stormInvalidateGameChain();
 }
 
 async function stormReadFileCached(mpqPath, innerPath) {
   const cacheRoot = path.join(app.getPath('userData'), 'mpq_cache');
-  const key = sha1(mpqPath + '|' + innerPath.toLowerCase());
+  const key = sha1('stormlib|' + mpqPath + '|' + String(innerPath || '').toLowerCase());
   const out = path.join(cacheRoot, key);
   try {
     if (fs.existsSync(out)) {
       return await fs.promises.readFile(out);
     }
     await fs.promises.mkdir(cacheRoot, { recursive: true });
-    // JS MPQ reader (no native dependency): open archive, read file, then cache on disk.
-    const archive = MpqArchive.getByPath(mpqPath);
-    await archive.promise;
-    const mpqName = innerPath.replace(/\//g, '\\');
-    const data = await archive.get(mpqName);
-    if (!data) {
-      throw new Error(`MPQ file not found: '${innerPath}' in '${mpqPath}'`);
+    const hMpq = stormOpenArchiveCached(mpqPath);
+    const mpqName = normalizeMpqInnerPath(innerPath);
+    const buf = stormReadFileFromHandle(hMpq, mpqName);
+    if (!buf) {
+      const err = new Error(`MPQ file not found: '${innerPath}' in '${mpqPath}'`);
+      err.code = 'ENOENT';
+      throw err;
     }
-    const buf = Buffer.from(data);
     await fs.promises.writeFile(out, buf);
     return buf;
   } catch (e) {
@@ -353,13 +596,10 @@ async function mpqReadFromChain(innerPath, preferredMapId = null) {
   } else if (mpqState.activeMapId && mpqState.archives.has(mpqState.activeMapId)) {
     tries.push(mpqState.archives.get(mpqState.activeMapId).path);
   }
-  for (const p of mpqState.gameMpqs) tries.push(p);
-
-  if (tries.length === 0) {
-    throw new Error('No MPQs loaded. Please set Warcraft III directory (with War3.mpq / War3x.mpq etc.).');
-  }
 
   let lastErr = null;
+
+  // 1) Map MPQ first
   for (const mpqPath of tries) {
     for (const cand of innerCandidates) {
       try {
@@ -369,7 +609,32 @@ async function mpqReadFromChain(innerPath, preferredMapId = null) {
       }
     }
   }
-  throw lastErr || new Error('MPQ file not found');
+
+  // 2) Game chain (base + attached patch/local mpqs)
+  if (mpqState.gameMpqs && mpqState.gameMpqs.length) {
+    for (const cand of innerCandidates) {
+      const buf = await stormReadFromGameChainCached(cand);
+      if (buf) return buf;
+    }
+
+    // 3) Leftover MPQs that couldn't be attached as patches
+    for (const mpqPath of stormState.gameLeftovers || []) {
+      for (const cand of innerCandidates) {
+        try {
+          return await stormReadFileCached(mpqPath, cand);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+    }
+  }
+
+  if (!lastErr) {
+    const err = new Error('MPQ file not found');
+    err.code = 'ENOENT';
+    throw err;
+  }
+  throw lastErr;
 }
 
 // 你要扫描的扩展名（按需增减）

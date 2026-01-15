@@ -7,12 +7,9 @@
   "type": "module",
   "main": "main.mjs",
   "scripts": {
-    "build:mpq": "tsc -p tsconfig.mpq.json",
     "dev:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/kill-dev-ports.ps1",
-    "prebuild": "npm run build:mpq",
-    "prestart": "npm run build:mpq",
     "dev": "node scripts/dev.mjs",
-    "dev:full": "npm run dev:clean && npm run build:mpq && node scripts/dev.mjs",
+    "dev:full": "npm run dev:clean && node scripts/dev.mjs",
     "build": "vite build",
     "start": "electron .",
     "typecheck": "tsc --noEmit"
@@ -20,7 +17,8 @@
   "dependencies": {
     "@webgpu/types": "0.1.60",
     "dds-parser": "1.0.1",
-    "gl-matrix": "3.3.0"
+    "gl-matrix": "3.3.0",
+    "koffi": "^2.8.0"
   },
   "devDependencies": {
     "@types/node": "22.15.3",
