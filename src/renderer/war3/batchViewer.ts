@@ -1166,7 +1166,7 @@ export class BatchViewer {
     if (!this.folder || !this.idx || !this.gpu) return false;
 
     const s = this.getSettings();
-    const models = this.folder.models.slice().sort();
+    const models = this.folder.models.slice();
     const total = models.length;
     let done = 0;
     const maxConcurrency = 1;
@@ -1346,7 +1346,7 @@ export class BatchViewer {
     const gpu = this.gpu!;
 
     const filter = (s.filter || '').trim().toLowerCase();
-    const allModels = folder.models.slice().sort();
+    const allModels = folder.models.slice();
     const filtered = filter
       ? allModels.filter(p => p.toLowerCase().includes(filter))
       : allModels;

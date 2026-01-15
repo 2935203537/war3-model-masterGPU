@@ -43,6 +43,68 @@ function sha1(s) {
   return crypto.createHash('sha1').update(s).digest('hex');
 }
 
+let _externalListIndexPromise = null;
+let _externalListIndex = null;
+
+async function ensureExternalListIndex() {
+  if (_externalListIndex) return _externalListIndex;
+  if (_externalListIndexPromise) return await _externalListIndexPromise;
+
+  _externalListIndexPromise = (async () => {
+    try {
+      const candidates = [
+        path.join(__dirname, 'asset', 'listfiles.txt'),
+        path.join(process.resourcesPath || '', 'asset', 'listfiles.txt'),
+      ].filter(Boolean);
+
+      let p = null;
+      for (const c of candidates) {
+        try {
+          if (c && fs.existsSync(c)) { p = c; break; }
+        } catch {}
+      }
+      if (!p) return null;
+
+      const buf = await fs.promises.readFile(p);
+      const txt = decodeTextSmart(buf);
+      const lines = String(txt || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+      const byBase = new Map();
+      const byRel = new Set();
+
+      for (const raw of lines) {
+        const rel = String(raw)
+          .replace(/[\u0000-\u001F\u007F]/g, '')
+          .replace(/\\/g, '/')
+          .replace(/\/{2,}/g, '/')
+          .replace(/^\/+/, '')
+          .trim();
+        if (!rel) continue;
+        const relLower0 = rel.toLowerCase();
+        if (!rel.includes('/') && !relLower0.startsWith('war3mapimported/')) continue;
+        const lower = relLower0;
+        byRel.add(lower);
+        const base = path.posix.basename(lower);
+        if (!base) continue;
+        const arr = byBase.get(base) || [];
+        if (arr.length < 24) {
+          arr.push(rel);
+          byBase.set(base, arr);
+        }
+      }
+
+      return { byBase, byRel };
+    } catch {
+      return null;
+    } finally {
+      _externalListIndexPromise = null;
+    }
+  })();
+
+  _externalListIndex = await _externalListIndexPromise;
+  return _externalListIndex;
+}
+
 const STORMLIB_READ_ONLY = 0x00000100;
 const STORMLIB_OPEN_FROM_MPQ = 0x00000000;
 
@@ -114,6 +176,26 @@ function ensureStormApi() {
     const SFileCloseFile = storm.func('bool __stdcall SFileCloseFile(FILEHANDLE hFile)');
     const SFileGetFileSize = storm.func('uint32 __stdcall SFileGetFileSize(FILEHANDLE hFile, _Out_ uint32 *pdwFileSizeHigh)');
     const SFileReadFile = storm.func('bool __stdcall SFileReadFile(FILEHANDLE hFile, void *buffer, uint32 bytesToRead, _Out_ uint32 *bytesRead, void *overlapped)');
+    const SFileHasFile = storm.func('bool __stdcall SFileHasFile(MPQHANDLE hMpq, str fileName)');
+
+    // File enumeration structs and functions
+    const SFILE_FIND_DATAA = koffi.struct("SFILE_FIND_DATAA", {
+      cFileName: "char[260]",
+      szPlainName: "char[260]",
+      dwFileSize: "uint32",
+      dwFileFlags: "uint32",
+      dwFileTimeLo: "uint32",
+      dwFileTimeHi: "uint32",
+    });
+
+    let SFileFindFirstFileA = null;
+    let SFileFindNextFileA = null;
+    let SFileFindClose = null;
+    let SFileListFile = null;
+    try { SFileFindFirstFileA = storm.func("void* __stdcall SFileFindFirstFile(MPQHANDLE hMpq, str mask, _Out_ SFILE_FIND_DATAA *findData, str listfile)"); } catch {}
+    try { SFileFindNextFileA = storm.func("bool __stdcall SFileFindNextFile(void* hFind, _Out_ SFILE_FIND_DATAA *findData)"); } catch {}
+    try { SFileFindClose = storm.func("bool __stdcall SFileFindClose(void* hFind)"); } catch {}
+    try { SFileListFile = storm.func("bool __stdcall SFileListFile(MPQHANDLE hMpq, str listfile, str outputFile)"); } catch {}
 
     _stormApi = {
       dllPath,
@@ -126,6 +208,12 @@ function ensureStormApi() {
       SFileCloseFile,
       SFileGetFileSize,
       SFileReadFile,
+      SFileHasFile,
+      SFILE_FIND_DATAA,
+      SFileFindFirstFileA,
+      SFileFindNextFileA,
+      SFileFindClose,
+      SFileListFile,
     };
 
     app.on('will-quit', () => {
@@ -146,6 +234,19 @@ function ensureStormApi() {
     const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
     _stormInitError = new Error('Failed to load StormLib via koffi: ' + msg);
     throw _stormInitError;
+  }
+}
+
+function stormHasFileFromHandle(hMpq, innerPath) {
+  const api = ensureStormApi();
+  if (!hMpq || !innerPath) return false;
+  const hFile = [null];
+  const ok = api.SFileOpenFileEx(hMpq, innerPath, STORMLIB_OPEN_FROM_MPQ, hFile);
+  if (!ok || !hFile[0]) return false;
+  try {
+    return true;
+  } finally {
+    try { api.SFileCloseFile(hFile[0]); } catch {}
   }
 }
 
@@ -187,7 +288,7 @@ function stormOpenArchiveCached(mpqPath) {
 
 function normalizeMpqInnerPath(p) {
   if (!p || typeof p !== 'string') return '';
-  let s = p.trim();
+  let s = p.replace(/\u0000/g, '').trim();
   s = s.replace(/^mpq:(?:auto|\d+):/i, '');
   s = s.replace(/^[\\/]+/, '');
   s = s.replace(/\\/g, '/');
@@ -216,6 +317,73 @@ function stormReadFileFromHandle(hMpq, innerPath) {
   } finally {
     try { api.SFileCloseFile(hFile[0]); } catch {}
   }
+}
+
+function decodeFindNameA(arr) {
+  if (!arr) return "";
+  const u8 = arr instanceof Uint8Array ? arr : Uint8Array.from(arr);
+  let len = 0;
+  while (len < u8.length && u8[len] !== 0) len++;
+  if (!len) return "";
+  const buf = Buffer.from(u8.buffer, u8.byteOffset, len);
+  return buf.toString('latin1');
+}
+
+function stormListFiles(mpqPath) {
+  const api = ensureStormApi();
+  if (!api.SFileFindFirstFileA) {
+    if (!api.SFileListFile) return [];
+    const hMpq = stormOpenArchiveCached(mpqPath);
+    const out = [];
+    try {
+      const tempDir = app.getPath('temp');
+      const tag = crypto.randomBytes(8).toString('hex');
+      const outPath = path.join(tempDir, `mpq_list_${tag}.txt`);
+      try {
+        api.SFileListFile(hMpq, null, outPath);
+      } catch {
+        return [];
+      }
+      const buf = fs.readFileSync(outPath);
+      const txt = buf.toString('utf8');
+      for (const line of String(txt || '').split(/\r?\n/)) {
+        const s = (line || '').trim();
+        if (s) out.push(s);
+      }
+      try { fs.unlinkSync(outPath); } catch {}
+    } catch {
+      return [];
+    }
+    return out;
+  }
+  if (!api.SFILE_FIND_DATAA) return [];
+  const hMpq = stormOpenArchiveCached(mpqPath);
+  const out = [];
+  let hFind = null;
+  let data = null;
+  try {
+    data = new api.SFILE_FIND_DATAA();
+    hFind = api.SFileFindFirstFileA(hMpq, "*", data, null);
+  } catch {
+    hFind = null;
+    data = null;
+  }
+  if (!hFind) return [];
+  const pushName = () => {
+    const name = decodeFindNameA(data.cFileName);
+    if (name) out.push(name);
+  };
+  try {
+    pushName();
+    while (true) {
+      const ok = api.SFileFindNextFileA(hFind, data);
+      if (!ok) break;
+      pushName();
+    }
+  } finally {
+    try { api.SFileFindClose(hFind); } catch {}
+  }
+  return out;
 }
 
 function stormEnsureGameChain() {
@@ -547,11 +715,13 @@ async function stormReadFileCached(mpqPath, innerPath) {
 async function mpqReadFromChain(innerPath, preferredMapId = null) {
   // Try map MPQ first (if any), then game MPQs.
   // Also apply best-effort path normalization / fallback for imported assets.
+  const extIndex = await ensureExternalListIndex();
   const expandInnerPaths = (p) => {
     if (!p || typeof p !== 'string') return [];
-    let s = p.trim().replace(/^\/+/, '');
+    let s = p.replace(/\u0000/g, '').trim().replace(/^\/+/, '');
     // Normalize slashes for canonical form.
     s = s.replace(/\\/g, '/');
+    s = s.replace(/\/{2,}/g, '/');
 
     const out = [];
     const add = (x) => {
@@ -564,9 +734,43 @@ async function mpqReadFromChain(innerPath, preferredMapId = null) {
     add(s.replace(/\//g, '\\')); // backslash variant
 
     const lower = s.toLowerCase();
+
+    // Many assets exist as .mdx in MPQs even if text .mdl is referenced/extracted.
+    // Add cross-extension fallback candidates.
+    if (lower.endsWith('.mdl')) {
+      const asMdx = s.slice(0, -4) + '.mdx';
+      add(asMdx);
+      add(asMdx.replace(/\//g, '\\'));
+    } else if (lower.endsWith('.mdx')) {
+      const asMdl = s.slice(0, -4) + '.mdl';
+      add(asMdl);
+      add(asMdl.replace(/\//g, '\\'));
+    }
+
     const hasDir = lower.includes('/');
     const ext = path.posix.extname(lower);
     const isAsset = MODEL_EXTS.has(ext) || TEX_EXTS.has(ext);
+
+    if (isAsset && extIndex?.byBase) {
+      const bases = [];
+      const baseLower = path.posix.basename(lower);
+      bases.push(baseLower);
+      if (baseLower.endsWith('.mdl')) bases.push(baseLower.slice(0, -4) + '.mdx');
+      if (baseLower.endsWith('.mdx')) bases.push(baseLower.slice(0, -4) + '.mdl');
+
+      for (const b of bases) {
+        const list = extIndex.byBase.get(b);
+        if (Array.isArray(list) && list.length) {
+          const max = Math.min(8, list.length);
+          for (let i = 0; i < max; i++) {
+            const rel = list[i];
+            if (!rel) continue;
+            add(rel);
+            add(rel.replace(/\//g, '\\'));
+          }
+        }
+      }
+    }
 
     // Many maps store non-custom imports under war3mapImported/<name>
     // but references may appear as bare filenames. Try both.
@@ -1023,8 +1227,13 @@ async function scanFolderRecursive(rootDir) {
 
   await walk(rootDir);
 
-  // 排序：让显示更稳定
-  models.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  // 排序：模型按修改时间降序（最新修改的排第一），贴图按路径排序
+  models.sort((a, b) => {
+    const ta = a.mtimeMs || 0;
+    const tb = b.mtimeMs || 0;
+    if (tb !== ta) return tb - ta;
+    return a.relPath.localeCompare(b.relPath);
+  });
   textures.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
   // 合并所有文件并转换格式以匹配 FolderData
@@ -1235,10 +1444,18 @@ ipcMain.handle('select-map', async () => {
   const files = [];
   const models = [];
   const seenLower = new Set();
+  const _api = (() => { try { return ensureStormApi(); } catch { return null; } })();
+  const _hMap = (() => { try { return _api ? stormOpenArchiveCached(mapPath) : null; } catch { return null; } })();
+  const _hGame = (() => { try { return _api ? stormEnsureGameChain() : null; } catch { return null; } })();
+
   const addFile = (rel) => {
     // Best-effort cleanup to avoid garbled/malformed paths.
     if (rel == null) return;
     let relStr = String(rel);
+    // Remove BOM and control chars that sometimes leak from protected/garbled listfiles.
+    relStr = relStr.replace(/\uFEFF/g, '');
+    relStr = relStr.replace(/[\u0000-\u001F]/g, '');
+    relStr = relStr.trim();
     // Drop strings with replacement chars or obvious binary garbage
     if (relStr.includes('\uFFFD')) return;
     // Heuristic: if it contains lots of latin1 high bytes but no CJK, it's likely mojibake from wrong decoding
@@ -1248,8 +1465,49 @@ ipcMain.handle('select-map', async () => {
     }
     const ext = normalizeExt(relStr);
     if (!MODEL_EXTS.has(ext) && !TEX_EXTS.has(ext)) return;
-    const relNorm = relStr.replace(/\\/g, '/').trim();
+    let relNorm = relStr.replace(/\\/g, '/').trim();
+    relNorm = relNorm.replace(/\/{2,}/g, '/');
     if (!relNorm) return;
+
+    // If the reference is just a bare filename with no folder, only keep it if we can resolve it
+    // via map MPQ or game MPQ chain. Otherwise it will just spam NOT_FOUND.
+    if (!/[\\/]/.test(relNorm)) {
+      let mapResolved = null;
+      try {
+        const inner = normalizeMpqInnerPath(relNorm);
+        if (_api && _hMap && _api.SFileHasFile(_hMap, inner)) {
+          mapResolved = relNorm;
+        } else {
+          const imp = `war3mapImported\\${relNorm}`;
+          if (_api && _hMap && _api.SFileHasFile(_hMap, normalizeMpqInnerPath(imp))) {
+            mapResolved = imp.replace(/\\\\/g, '/');
+          }
+        }
+      } catch {
+        // ignore
+      }
+      if (mapResolved) {
+        relNorm = mapResolved;
+      } else {
+        // Skip bare filenames that don't exist in map MPQ
+        return;
+      }
+    }
+
+    // Filter out entries that don't exist in map/game MPQs to avoid NOT_FOUND spam.
+    if (_api && (_hMap || _hGame)) {
+      try {
+        const inner = normalizeMpqInnerPath(relNorm);
+        if (inner) {
+          const ok = (_hMap && _api.SFileHasFile(_hMap, inner)) ||
+            (_hGame && _api.SFileHasFile(_hGame, inner));
+          if (!ok) return;
+        }
+      } catch {
+        // If anything goes wrong, keep the entry (best-effort).
+      }
+    }
+
     const relLower = relNorm.toLowerCase();
     if (seenLower.has(relLower)) return;
     seenLower.add(relLower);
@@ -1263,10 +1521,39 @@ ipcMain.handle('select-map', async () => {
     for (const rel of lines) addFile(rel);
   }
 
-  // Merge额外扫描到的资源（弥补 listfile 不全的情况）。
+  // Merge extra scanned resources to cover incomplete listfiles.
   if (extracted) {
     for (const rel of extracted.models) addFile(rel);
     for (const rel of extracted.textures) addFile(rel);
+  }
+
+  // Probe external listfile entries against map MPQ (helps protected maps).
+  try {
+    const extIndex = await ensureExternalListIndex();
+    if (extIndex && extIndex.byRel && extIndex.byRel.size) {
+      for (const rel of extIndex.byRel.keys()) {
+        const ext = normalizeExt(rel);
+        if (!MODEL_EXTS.has(ext) && !TEX_EXTS.has(ext)) continue;
+        const inner = normalizeMpqInnerPath(rel);
+        try {
+          if (_api && _hMap && _api.SFileHasFile(_hMap, inner)) addFile(rel);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Stronger enumeration: use StormLib file table if available (Ladik-style).
+  try {
+    const stormList = stormListFiles(mapPath);
+    if (stormList && stormList.length) {
+      for (const rel of stormList) addFile(rel);
+    }
+  } catch {
+    // ignore
   }
 
   files.sort((a, b) => a.rel.localeCompare(b.rel));
@@ -1400,38 +1687,78 @@ ipcMain.handle("read-file", async (_evt, absPath) => {
     //  - mpq:<id>:<innerPath>
     //  - mpq:auto:<innerPath> (search map MPQ then game MPQs)
     if (absPath.startsWith('mpq:')) {
-      const mId = absPath.match(/^mpq:(\d+):(.*)$/);
+      const rest = absPath.slice('mpq:'.length);
+
+      const mId = rest.match(/^(\d+):(.*)$/);
       if (mId) {
         const id = Number(mId[1]);
-	    // 注意：某些旧版本可能会构造出 "mpq:1: <path>"（冒号后有空格）
-	    // 这里做一次 trim/normalize，避免找不到文件。
-	    const inner = String(mId[2] ?? '').trim();
-	    const data = await mpqReadFromChain(inner, id);
-	    readFileCacheSet(absPath, data);
-	    return readFileCacheGet(absPath) || data;
+        const inner = String(mId[2] ?? '').replace(/\u0000/g, '').trim();
+        if (!inner) return null;
+        try {
+          const data = await mpqReadFromChain(inner, id);
+          readFileCacheSet(absPath, data);
+          return readFileCacheGet(absPath) || data;
+        } catch (e) {
+          const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+          if (String(msg).startsWith('NOT_FOUND:') || String(msg).includes('ENOENT')) return null;
+          throw e;
+        }
       }
-      const mAuto = absPath.match(/^mpq:auto:(.*)$/);
+
+      const mAuto = rest.match(/^auto:(.*)$/);
       if (mAuto) {
-	    const inner = String(mAuto[1] ?? '').trim();
-	    const data = await mpqReadFromChain(inner, null);
-	    readFileCacheSet(absPath, data);
-	    return readFileCacheGet(absPath) || data;
+        const inner = String(mAuto[1] ?? '').replace(/\u0000/g, '').trim();
+        if (!inner) return null;
+        try {
+          const data = await mpqReadFromChain(inner, null);
+          readFileCacheSet(absPath, data);
+          return readFileCacheGet(absPath) || data;
+        } catch (e) {
+          const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+          if (String(msg).startsWith('NOT_FOUND:') || String(msg).includes('ENOENT')) return null;
+          throw e;
+        }
       }
-      // Unknown mpq scheme
+
+      // mpq:! prefix or bare mpq:path
+      if (rest.startsWith('!')) {
+        const inner = rest.slice(1).trim();
+        if (!inner) return null;
+        try {
+          const data = await mpqReadFromChain(inner, null);
+          readFileCacheSet(absPath, data);
+          return readFileCacheGet(absPath) || data;
+        } catch (e) {
+          const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+          if (String(msg).startsWith('NOT_FOUND:') || String(msg).includes('ENOENT')) return null;
+          throw e;
+        }
+      }
+
+      const inner = String(rest ?? '').trim();
+      if (inner) {
+        try {
+          const data = await mpqReadFromChain(inner, null);
+          readFileCacheSet(absPath, data);
+          return readFileCacheGet(absPath) || data;
+        } catch (e) {
+          const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+          if (String(msg).startsWith('NOT_FOUND:') || String(msg).includes('ENOENT')) return null;
+          throw e;
+        }
+      }
+
       return null;
     }
 
     const data = await fs.promises.readFile(absPath);
-    // Electron 会把 Buffer 序列化成可传输的 Uint8Array/ArrayBuffer
-
     readFileCacheSet(absPath, data);
     return data;
   } catch (e) {
     const code = (e && typeof e === 'object' && 'code' in e) ? String(e.code) : '';
-    if (code === 'ENOENT') return null;
-
-    // Propagate rich error to renderer (ipcRenderer.invoke will reject), so the UI shows the real reason.
     const msg = (e && typeof e === 'object' && 'message' in e) ? String(e.message) : String(e);
+    if (code === 'ENOENT' || String(msg).startsWith('NOT_FOUND:') || String(msg).includes('ENOENT')) return null;
+
     const stderr = (e && typeof e === 'object' && 'stderr' in e && e.stderr) ? String(e.stderr) : '';
     console.error('[read-file] failed:', absPath, msg, stderr);
     throw new Error(stderr ? `${msg} | ${stderr}` : msg);

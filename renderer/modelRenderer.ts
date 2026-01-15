@@ -1250,7 +1250,8 @@ export class ModelRenderer {
                     for (let j = 0; j < material.Layers.length; ++j) {
                         const layer = material.Layers[j];
                         const textureID = this.rendererData.materialLayerTextureID[materialID][j];
-                        const texture = this.model.Textures[textureID];
+                        const texture = this.model.Textures?.[textureID];
+                        if (!texture) continue;
 
                         const uvIndex = this.getUvSetIndex(geoset, layer.CoordId);
                         pass.setVertexBuffer(2, this.gpuTexCoordBuffer[i][uvIndex]);
