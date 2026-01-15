@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>War3 Model Desktop Viewer (WebGPU)</title>
   <link rel="stylesheet" href="./styles.css" />
-</head>
+  </head>
 <body>
   <header class="topbar">
     <div class="toolbar-left">
-      <button id="btnPick" class="btn">选择文件夹</button>
-      <button id="btnPickMap" class="btn">打开W3X/W3M</button>
+      <button id="btnPick" class="btn btn-outline">📂 选择文件夹</button>
+      <button id="btnPickMap" class="btn btn-outline">🗺️ 打开W3X/W3M</button>
 
       <div class="field">
         <label>数量</label>
@@ -18,9 +18,9 @@
       </div>
 
       <div class="pager">
-        <button id="btnPrev" class="btn btn-ghost" title="上一页">&lt;</button>
-        <span id="txtPage" class="pager-text">0/0</span>
-        <button id="btnNext" class="btn btn-ghost" title="下一页">&gt;</button>
+        <button id="btnPrev" class="btn btn-icon" title="上一页">❮</button>
+        <span id="txtPage" class="pager-text">1/1</span>
+        <button id="btnNext" class="btn btn-icon" title="下一页">❯</button>
         <input id="inpJump" class="pager-input" type="number" min="1" value="1" />
         <button id="btnJump" class="btn btn-ghost" title="跳转">跳转</button>
       </div>
@@ -36,7 +36,7 @@
       </div>
       <label class="toggle"><input id="chkLoop" type="checkbox" checked />循环</label>
       <label class="toggle"><input id="togRotate" type="checkbox" checked />旋转</label>
-      <button id="btnCache" class="btn">一键缓存</button>
+      <button id="btnCache" class="btn btn-primary">💾 一键缓存</button>
     </div>
 
     <div class="toolbar-right">
@@ -53,8 +53,8 @@
       </div>
 
       <div class="sidebar-actions">
-        <button id="btnSelAll" class="btn btn-ghost">全选</button>
-        <button id="btnSelNone" class="btn btn-ghost">取消</button>
+        <button id="btnSelAll" class="btn btn-sm">全选</button>
+        <button id="btnSelNone" class="btn btn-sm">反选</button>
       </div>
 
       <div id="fileList" class="file-list"></div>
@@ -65,11 +65,11 @@
           <div id="txtOutDir" class="export-value">未选择</div>
         </div>
         <div class="sidebar-actions">
-          <button id="btnPickOut" class="btn">选择目录</button>
+          <button id="btnPickOut" class="btn btn-sm btn-outline">📁 选择目录</button>
         </div>
         <div class="sidebar-actions">
-          <button id="btnExportSelected" class="btn">导出选中</button>
-          <button id="btnExportAll" class="btn btn-ghost">导出全部</button>
+          <button id="btnExportSelected" class="btn btn-sm btn-accent">⬇ 一键导出</button>
+          <button id="btnExportAll" class="btn btn-sm btn-danger">🗑 一键清除</button>
         </div>
       </div>
     </aside>

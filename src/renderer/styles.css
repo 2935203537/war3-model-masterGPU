@@ -155,14 +155,75 @@ body {
   background: #3b3b3b;
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 8px 14px;
+  border-radius: 6px;
   cursor: pointer;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
 }
-.btn:hover { background: #444; }
+.btn:hover { background: #484848; }
+.btn:active { transform: scale(0.98); }
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.btn-icon {
+  padding: 6px 8px;
+  min-width: 32px;
+  justify-content: center;
+}
 
 .btn-ghost {
   background: rgba(0,0,0,0.12);
+  border-color: transparent;
+}
+.btn-ghost:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: var(--border);
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid #555;
+}
+.btn-outline:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: #777;
+}
+
+.btn-primary {
+  background: #4a7dff;
+  border-color: #4a7dff;
+  color: #fff;
+}
+.btn-primary:hover {
+  background: #5a8aff;
+  border-color: #5a8aff;
+}
+
+.btn-accent {
+  background: #9d5cff;
+  border-color: #9d5cff;
+  color: #fff;
+}
+.btn-accent:hover {
+  background: #aa70ff;
+  border-color: #aa70ff;
+}
+
+.btn-danger {
+  background: #e05555;
+  border-color: #e05555;
+  color: #fff;
+}
+.btn-danger:hover {
+  background: #e86868;
+  border-color: #e86868;
 }
 
 .field {
