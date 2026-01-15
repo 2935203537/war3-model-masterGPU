@@ -330,16 +330,57 @@ class ModelTile {
   }
 
   private computeCamera(model: Model) {
-    const info = model.Info;
-    if (info?.MinimumExtent && info?.MaximumExtent) {
-      const min = info.MinimumExtent;
-      const max = info.MaximumExtent;
-      vec3.set(this.center, (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
-      const radius = info.BoundsRadius || Math.max(10, vec3.distance(vec3.fromValues(min[0], min[1], min[2]), vec3.fromValues(max[0], max[1], max[2])) / 2);
-      this.cameraDistance = Math.max(120, radius * 2.6);
+    // 遍历所有 geosets 计算实际包围盒（比 Info 中的包围盒更准确）
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let hasGeosetBounds = false;
+
+    if (model.Geosets && model.Geosets.length > 0) {
+      for (const geo of model.Geosets) {
+        if (geo.MinimumExtent) {
+          minX = Math.min(minX, geo.MinimumExtent[0]);
+          minY = Math.min(minY, geo.MinimumExtent[1]);
+          minZ = Math.min(minZ, geo.MinimumExtent[2]);
+          hasGeosetBounds = true;
+        }
+        if (geo.MaximumExtent) {
+          maxX = Math.max(maxX, geo.MaximumExtent[0]);
+          maxY = Math.max(maxY, geo.MaximumExtent[1]);
+          maxZ = Math.max(maxZ, geo.MaximumExtent[2]);
+          hasGeosetBounds = true;
+        }
+      }
+    }
+
+    // 如果 geosets 没有包围盒，使用 Info 中的包围盒
+    if (!hasGeosetBounds) {
+      const info = model.Info;
+      if (info?.MinimumExtent && info?.MaximumExtent) {
+        minX = info.MinimumExtent[0]; minY = info.MinimumExtent[1]; minZ = info.MinimumExtent[2];
+        maxX = info.MaximumExtent[0]; maxY = info.MaximumExtent[1]; maxZ = info.MaximumExtent[2];
+        hasGeosetBounds = true;
+      }
+    }
+
+    if (hasGeosetBounds && isFinite(minX) && isFinite(maxX)) {
+      const sizeX = maxX - minX;
+      const sizeY = maxY - minY;
+      const sizeZ = maxZ - minZ;
+
+      // 计算中心点：XY 取几何中心，Z 取几何中心（50%）
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const cz = (minZ + maxZ) / 2;
+      vec3.set(this.center, cx, cy, cz);
+
+      // 使用最大尺寸计算相机距离，让模型填满视口
+      const maxSize = Math.max(sizeX, sizeY, sizeZ);
+      const fov = Math.PI / 4;
+      // 系数 1.0 让模型几乎填满视口
+      this.cameraDistance = Math.max(50, (maxSize / 2) / Math.tan(fov / 2) * 1.0);
     } else {
       vec3.set(this.center, 0, 0, 0);
-      this.cameraDistance = 600;
+      this.cameraDistance = 300;
     }
   }
 
@@ -415,12 +456,13 @@ class ModelTile {
     mat4.perspective(pMatrix, Math.PI / 4, aspect, 0.1, 50000);
 
     const dist = this.cameraDistance;
-    const z = this.center[2];
+    // 使用较小的俯仰角（约 15 度），让相机更水平地看向模型中心
+    const elevationAngle = 0.15;
     vec3.set(
       cameraPos,
-      this.center[0] + Math.cos(this.theta) * dist,
-      this.center[1] + Math.sin(this.theta) * dist,
-      z + dist * 0.35
+      this.center[0] + Math.cos(this.theta) * dist * Math.cos(elevationAngle),
+      this.center[1] + Math.sin(this.theta) * dist * Math.cos(elevationAngle),
+      this.center[2] + dist * Math.sin(elevationAngle)
     );
     vec3.copy(cameraTarget, this.center);
 
@@ -818,16 +860,52 @@ class SingleModelViewer {
   }
 
   private computeCamera(model: Model) {
-    const info = model.Info;
-    if (info?.MinimumExtent && info?.MaximumExtent) {
-      const min = info.MinimumExtent;
-      const max = info.MaximumExtent;
-      vec3.set(this.center, (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
-      const radius = info.BoundsRadius || Math.max(10, vec3.distance(vec3.fromValues(min[0], min[1], min[2]), vec3.fromValues(max[0], max[1], max[2])) / 2);
-      this.distance = Math.max(120, radius * 2.6);
+    // 遍历所有 geosets 计算实际包围盒
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let hasGeosetBounds = false;
+
+    if (model.Geosets && model.Geosets.length > 0) {
+      for (const geo of model.Geosets) {
+        if (geo.MinimumExtent) {
+          minX = Math.min(minX, geo.MinimumExtent[0]);
+          minY = Math.min(minY, geo.MinimumExtent[1]);
+          minZ = Math.min(minZ, geo.MinimumExtent[2]);
+          hasGeosetBounds = true;
+        }
+        if (geo.MaximumExtent) {
+          maxX = Math.max(maxX, geo.MaximumExtent[0]);
+          maxY = Math.max(maxY, geo.MaximumExtent[1]);
+          maxZ = Math.max(maxZ, geo.MaximumExtent[2]);
+          hasGeosetBounds = true;
+        }
+      }
+    }
+
+    if (!hasGeosetBounds) {
+      const info = model.Info;
+      if (info?.MinimumExtent && info?.MaximumExtent) {
+        minX = info.MinimumExtent[0]; minY = info.MinimumExtent[1]; minZ = info.MinimumExtent[2];
+        maxX = info.MaximumExtent[0]; maxY = info.MaximumExtent[1]; maxZ = info.MaximumExtent[2];
+        hasGeosetBounds = true;
+      }
+    }
+
+    if (hasGeosetBounds && isFinite(minX) && isFinite(maxX)) {
+      const sizeX = maxX - minX;
+      const sizeY = maxY - minY;
+      const sizeZ = maxZ - minZ;
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const cz = (minZ + maxZ) / 2;
+      vec3.set(this.center, cx, cy, cz);
+
+      const maxSize = Math.max(sizeX, sizeY, sizeZ);
+      const fov = Math.PI / 4;
+      this.distance = Math.max(50, (maxSize / 2) / Math.tan(fov / 2) * 1.0);
     } else {
       vec3.set(this.center, 0, 0, 0);
-      this.distance = 600;
+      this.distance = 300;
     }
     this.theta = 0;
     this.phi = 0.45;
