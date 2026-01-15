@@ -945,24 +945,18 @@ var JpegImage = (function jpegImage() {
                     }
                     break;
                 case 4:
+                    // BLP1 JPEG 4-component: treat as BGRA (not CMYK)
+                    // Component order: B, G, R, A
                     while (j < imageDataBytes) {
-                        C = data[i++];
-                        M = data[i++];
-                        Y = data[i++];
-                        K = data[i++];
-
-                        k0 = 255 - K;
-                        k1 = k0 / 255;
-
-
-                        R = clampToUint8(k0 - C * k1);
-                        G = clampToUint8(k0 - M * k1);
-                        B = clampToUint8(k0 - Y * k1);
+                        B = data[i++];
+                        G = data[i++];
+                        R = data[i++];
+                        K = data[i++]; // Alpha
 
                         imageDataArray[j++] = R;
                         imageDataArray[j++] = G;
                         imageDataArray[j++] = B;
-                        imageDataArray[j++] = 255;
+                        imageDataArray[j++] = K; // Use as alpha
                     }
                     break;
                 default:

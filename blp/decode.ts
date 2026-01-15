@@ -111,6 +111,7 @@ export function getImageData (blp: BLPImage, mipmapLevel: number): ImageDataLike
         data.set(uint8Data.subarray(40 * 4, 40 * 4 + headerSize));
         data.set(uint8Data.subarray(mipmap.offset, mipmap.offset + mipmap.size), headerSize);
 
+        // JPEG 解码器会处理 4 分量 JPEG 的 alpha 通道
         return decodeJPEG(data);
     } else {
         const palette = new Uint8Array(blp.data, 39 * 4, 256 * 4),

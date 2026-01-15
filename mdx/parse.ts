@@ -500,6 +500,7 @@ function parseGeosetAnims (model: Model, state: State, size: number): void {
         geosetAnim.Alpha = state.float32();
         geosetAnim.Flags = state.int32();
         geosetAnim.Color = new Float32Array(3);
+        // MDX 文件中颜色是 RGB 格式
         for (let i = 0; i < 3; ++i) {
             geosetAnim.Color[i] = state.float32();
         }

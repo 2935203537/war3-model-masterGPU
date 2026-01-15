@@ -717,16 +717,10 @@ function parseGeosetAnim (state: State, model: Model): void {
             if (isStatic) {
                 const array = new Float32Array(3);
                 res.Color = parseArray(state, array, 0) as Float32Array;
-                res.Color.reverse();
+                // MDL 文件中颜色已经是 RGB 格式，不需要反转
             } else {
                 res.Color = parseAnimVector(state, AnimVectorType.FLOAT3);
-                for (const key of res.Color.Keys) {
-                    key.Vector.reverse();
-                    if (key.InTan) {
-                        key.InTan.reverse();
-                        key.OutTan.reverse();
-                    }
-                }
+                // MDL 文件中颜色已经是 RGB 格式，不需要反转
             }
         } else if (keyword === 'DropShadow') {
             res.Flags |= GeosetAnimFlags[keyword];
@@ -1142,11 +1136,7 @@ function parseParticleEmitter2 (state: State, model: Model): void {
 
                 const colorArr = new Float32Array(3);
                 parseArray(state, colorArr, 0);
-
-                // bgr order, inverse from mdx
-                const temp = colorArr[0];
-                colorArr[0] = colorArr[2];
-                colorArr[2] = temp;
+                // MDL 文件中颜色已经是 RGB 格式，不需要反转
                 colors.push(colorArr);
 
                 parseSymbol(state, ',');
@@ -1283,26 +1273,13 @@ function parseLight (state: State, model: Model): void {
                     break;
             }
             res[keyword] = parseAnimVector(state, type);
-            if (keyword === 'Color' || keyword === 'AmbColor') {
-                for (const key of (res[keyword] as AnimVector).Keys) {
-                    key.Vector.reverse();
-                    if (key.InTan) {
-                        key.InTan.reverse();
-                        key.OutTan.reverse();
-                    }
-                }
-            }
+            // MDL 文件中颜色已经是 RGB 格式，不需要反转
         } else if (keyword === 'Omnidirectional' || keyword === 'Directional' || keyword === 'Ambient') {
             res.LightType = LightType[keyword];
         } else if (keyword === 'Color' || keyword === 'AmbColor') {
             const color = new Float32Array(3);
             parseArray(state, color, 0);
-
-            // bgr order, inverse from mdx
-            const temp = color[0];
-            color[0] = color[2];
-            color[2] = temp;
-
+            // MDL 文件中颜色已经是 RGB 格式，不需要反转
             res[keyword] = color;
         } else {
             res[keyword] = parseNumber(state);
@@ -1418,12 +1395,7 @@ function parseRibbonEmitter (state: State, model: Model): void {
         } else if (keyword === 'Color') {
             const color = new Float32Array(3);
             parseArray(state, color, 0);
-
-            // bgr order, inverse from mdx
-            const temp = color[0];
-            color[0] = color[2];
-            color[2] = temp;
-
+            // MDL 文件中颜色已经是 RGB 格式，不需要反转
             res[keyword] = color;
         } else {
             res[keyword] = parseNumber(state);
