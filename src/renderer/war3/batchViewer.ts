@@ -10,14 +10,24 @@ function fallbackMipmaps(): any[] {
   return [typeof ImageData !== 'undefined' ? new ImageData(data, 1, 1) : { width: 1, height: 1, data, colorSpace: 'srgb' }];
 }
 
+const MODEL_CACHE_MAX_ITEMS = 300;
 const modelCache = new Map<string, Model>();
 
 function getCachedModel(modelAbs: string): Model | null {
-  return modelCache.get(modelAbs) || null;
+  const v = modelCache.get(modelAbs) || null;
+  if (!v) return null;
+  modelCache.delete(modelAbs);
+  modelCache.set(modelAbs, v);
+  return v;
 }
 
 function setCachedModel(modelAbs: string, model: Model): void {
+  modelCache.delete(modelAbs);
   modelCache.set(modelAbs, model);
+  while (modelCache.size > MODEL_CACHE_MAX_ITEMS) {
+    const oldestKey = modelCache.keys().next().value as string;
+    modelCache.delete(oldestKey);
+  }
 }
 
 function findSequenceIndexByName(model: Model | null, animName: string): number {
@@ -1025,6 +1035,9 @@ export class BatchViewer {
   private lastPage = 0;
   private lastPageSize = 1;
 
+  private prefetchGen = 0;
+  private prefetching = false;
+
   private readonly tilePoolMax = 200;
 
   private tilePoolGet(modelAbs: string): ModelTile | null {
@@ -1260,6 +1273,72 @@ export class BatchViewer {
     this.statusEl.textContent = text;
   }
 
+  private startPrefetchNextPage(filtered: string[], page: number, pageSize: number) {
+    if (!this.folder || !this.idx) return;
+
+    this.prefetchGen++;
+    const gen = this.prefetchGen;
+
+    const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const nextPage = page + 1;
+    if (nextPage >= pages) return;
+
+    const start = nextPage * pageSize;
+    const end = start + pageSize;
+    const list = filtered.slice(start, end);
+    if (!list.length) return;
+
+    if (this.prefetching) return;
+    this.prefetching = true;
+
+    (async () => {
+      try {
+        for (let i = 0; i < list.length; i++) {
+          if (gen !== this.prefetchGen) return;
+          const rel = list[i];
+          const modelAbs = this.resolveModelAbs(rel);
+          if (!modelAbs) continue;
+
+          try {
+            let model = getCachedModel(modelAbs);
+            if (!model) {
+              const bytes = await this.readFile(modelAbs);
+              const lower = modelAbs.toLowerCase();
+              const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+              if (lower.endsWith('.mdx') || isMDXBytes(bytes)) {
+                model = parseMDX(array);
+              } else {
+                const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+                model = parseMDL(text);
+              }
+              ensureModelHasSequence(model);
+              setCachedModel(modelAbs, model);
+            }
+
+            for (const tex of model.Textures || []) {
+              if (!tex?.Image) continue;
+              const abs = resolveTextureAbs(tex.Image, modelAbs, this.idx);
+              if (!abs) continue;
+              try {
+                await this.readFile(abs);
+              } catch {
+              }
+            }
+          } catch {
+          }
+
+          if (i % 3 === 0) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+      } finally {
+        if (gen === this.prefetchGen) {
+          this.prefetching = false;
+        }
+      }
+    })();
+  }
+
   private renderTiles() {
     const s = this.getSettings();
     const folder = this.folder!;
@@ -1327,6 +1406,8 @@ export class BatchViewer {
     this.tilePoolEvict(keepAbs);
 
     this.status(`模型: ${filtered.length}  | 页: ${page + 1}/${pages}  | 显示: ${list.length}`);
+
+    this.startPrefetchNextPage(filtered, page, pageSize);
   }
 
   private enqueueLoad(tile: ModelTile) {
