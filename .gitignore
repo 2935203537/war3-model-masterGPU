@@ -1,1 +1,7 @@
 node_modules
+dist
+*.log
+.env
+.DS_Store
+Thumbs.db
+install_log.txt

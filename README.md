@@ -118,3 +118,13 @@ npm run dev
 ```
 
 > Electron 需要较新的版本才能默认启用 WebGPU。如果你看到 WebGPU 不可用，请升级 Electron。 
+
+## 赞助支持 / Donate
+
+如果这个项目对你有帮助，欢迎请作者喝杯咖啡 ☕
+
+| 微信 | 支付宝 |
+|:---:|:---:|
+| <img src="./donate/wechat.png" width="200"> | <img src="./donate/alipay.png" width="200"> |
+
+感谢你的支持！ Thank you for your support!
