@@ -124,6 +124,16 @@ window.addEventListener('war3:modelsChanged', (ev) => {
   refreshAll();
 });
 
+window.addEventListener('war3:modelRenamed', (ev) => {
+  const e = ev as CustomEvent<any>;
+  const oldAbs: string = e?.detail?.oldAbs || '';
+  const newAbs: string = e?.detail?.newAbs || '';
+  if (oldAbs && newAbs) {
+    viewer.onModelRenamed(oldAbs, newAbs);
+    refreshAll();
+  }
+});
+
 function renderPageInfo() {
   const info = viewer.getRenderInfo();
   if (!info) {

@@ -1646,6 +1646,21 @@ ipcMain.handle("fs:deleteFiles", async (_evt, absPaths) => {
   }
 });
 
+// --- IPC：重命名文件 ---
+ipcMain.handle("fs:renameFile", async (_evt, oldAbs, newAbs) => {
+  try {
+    if (!oldAbs || typeof oldAbs !== 'string') return false;
+    if (!newAbs || typeof newAbs !== 'string') return false;
+    if (oldAbs.startsWith('mpq:') || newAbs.startsWith('mpq:')) return false;
+    const st = await statSafe(oldAbs);
+    if (!st || !st.isFile()) return false;
+    await fs.promises.rename(oldAbs, newAbs);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 // --- IPC：写文件（二进制）---
 ipcMain.handle("fs:writeFile", async (_evt, absPath, data) => {
   try {

@@ -21,6 +21,7 @@ declare global {
       exportFiles: (outRoot: string, items: { src: string; rel: string }[]) => Promise<boolean>;
       writeFile: (absPath: string, data: Uint8Array) => Promise<boolean>;
       deleteFiles: (absPaths: string[]) => Promise<boolean>;
+      renameFile: (oldAbs: string, newAbs: string) => Promise<boolean>;
     };
   }
 }

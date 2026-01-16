@@ -652,6 +652,8 @@ class SingleModelViewer {
   private btnShot: HTMLButtonElement;
   private btnDelModel: HTMLButtonElement;
   private btnDelModelTex: HTMLButtonElement;
+  private inpRenameName: HTMLInputElement;
+  private btnRenameModel: HTMLButtonElement;
 
   private outDir: string | null = null;
 
@@ -771,6 +773,14 @@ class SingleModelViewer {
             <button class="btn" id="singleExport">导出模型与贴图</button>
             <button class="btn btn-ghost" id="singleShot">导出当前截图（PNG）</button>
 
+            <div class="single-field" style="margin-top:10px;">
+              <label>重命名模型</label>
+              <div class="single-row">
+                <input class="field-input" id="singleRenameName" placeholder="新文件名" />
+                <button class="btn" id="singleRenameBtn">重命名</button>
+              </div>
+            </div>
+
             <button class="btn btn-danger" id="singleDelModel">删除模型（仅模型）</button>
             <button class="btn btn-danger" id="singleDelModelTex">删除模型（以及贴图）</button>
           </div>
@@ -796,6 +806,8 @@ class SingleModelViewer {
     this.btnShot = this.overlay.querySelector('#singleShot') as HTMLButtonElement;
     this.btnDelModel = this.overlay.querySelector('#singleDelModel') as HTMLButtonElement;
     this.btnDelModelTex = this.overlay.querySelector('#singleDelModelTex') as HTMLButtonElement;
+    this.inpRenameName = this.overlay.querySelector('#singleRenameName') as HTMLInputElement;
+    this.btnRenameModel = this.overlay.querySelector('#singleRenameBtn') as HTMLButtonElement;
 
     // events
     this.btnBack.addEventListener('click', () => this.close());
@@ -993,7 +1005,50 @@ class SingleModelViewer {
       await this.deleteCurrent(true);
     });
 
+    this.btnRenameModel.addEventListener('click', async () => {
+      await this.renameCurrent();
+    });
+
     this.overlay.style.display = 'none';
+  }
+
+  private async renameCurrent() {
+    if (!window.war3Desktop || !this.modelAbs) return;
+    if (isVirtualMpqPath(this.modelAbs)) {
+      alert('MPQ 内资源无法重命名。');
+      return;
+    }
+
+    const newName = (this.inpRenameName.value || '').trim();
+    if (!newName) {
+      alert('请输入新的文件名。');
+      return;
+    }
+
+    const dir = dirNameAbs(this.modelAbs);
+    const oldExt = this.modelAbs.toLowerCase().endsWith('.mdl') ? '.mdl' : '.mdx';
+    const newAbs = `${dir}/${newName}${oldExt}`;
+
+    if (newAbs.replace(/\\/g, '/').toLowerCase() === this.modelAbs.replace(/\\/g, '/').toLowerCase()) {
+      return;
+    }
+
+    const ok = await window.war3Desktop.renameFile(this.modelAbs, newAbs);
+    if (!ok) {
+      alert('重命名失败（可能文件已存在或权限不足）。');
+      return;
+    }
+
+    const oldAbs = this.modelAbs;
+    this.modelAbs = newAbs;
+    this.titleEl.textContent = displayModelName(newAbs);
+    this.inpExportName.value = newName;
+    this.inpRenameName.value = newName;
+    this.updateExportHint();
+
+    try {
+      window.dispatchEvent(new CustomEvent('war3:modelRenamed', { detail: { oldAbs, newAbs } }));
+    } catch {}
   }
 
   private async deleteCurrent(withTextures: boolean) {
@@ -1154,7 +1209,9 @@ class SingleModelViewer {
       this.computeCamera(model);
 
       const base = displayModelName(modelAbs);
-      this.inpExportName.value = base.replace(/\.[^.]+$/, '');
+      const baseName = base.replace(/\.[^.]+$/, '');
+      this.inpExportName.value = baseName;
+      this.inpRenameName.value = baseName;
       this.updateExportHint();
 
       // anim list
@@ -1730,6 +1787,44 @@ export class BatchViewer {
     this.folder.models = this.folder.models.filter((m) => m !== rel);
     this.renderTiles();
     this.emitModelsChanged([rel]);
+  }
+
+  public onModelRenamed(oldAbs: string, newAbs: string) {
+    if (!this.folder || !this.idx) return;
+    const oldAbsNorm = (oldAbs || '').replace(/\\/g, '/');
+    const oldAbsLower = oldAbsNorm.toLowerCase();
+    const newAbsNorm = (newAbs || '').replace(/\\/g, '/');
+
+    const oldRelIdx = this.folder.models.findIndex((m) => {
+      const a = this.idx?.byRelLower.get(m.replace(/\\/g, '/').toLowerCase());
+      return (a || '').replace(/\\/g, '/').toLowerCase() === oldAbsLower;
+    });
+
+    if (oldRelIdx < 0) return;
+
+    const root = this.folder.root.replace(/\\/g, '/');
+    const newRel = newAbsNorm.startsWith(root)
+      ? newAbsNorm.slice(root.length).replace(/^\/+/, '')
+      : newAbsNorm.split('/').pop() || '';
+    const newBase = newAbsNorm.split('/').pop() || '';
+
+    this.folder.models[oldRelIdx] = newRel;
+
+    const fileIdx = this.folder.files.findIndex((f) =>
+      f.abs.replace(/\\/g, '/').toLowerCase() === oldAbsLower
+    );
+    if (fileIdx >= 0) {
+      this.folder.files[fileIdx] = {
+        ...this.folder.files[fileIdx],
+        abs: newAbsNorm,
+        rel: newRel,
+        base: newBase,
+      };
+    }
+
+    this.idx = this.buildIndex(this.folder);
+    this.tilePool.clear();
+    this.renderTiles();
   }
 
   private lastLoopTime = 0;

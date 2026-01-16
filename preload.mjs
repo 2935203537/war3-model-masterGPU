@@ -11,4 +11,5 @@ contextBridge.exposeInMainWorld("war3Desktop", {
   exportFiles: (outRoot, items) => ipcRenderer.invoke("fs:exportFiles", outRoot, items),
   writeFile: (absPath, data) => ipcRenderer.invoke("fs:writeFile", absPath, data),
   deleteFiles: (absPaths) => ipcRenderer.invoke("fs:deleteFiles", absPaths),
+  renameFile: (oldAbs, newAbs) => ipcRenderer.invoke("fs:renameFile", oldAbs, newAbs),
 });
