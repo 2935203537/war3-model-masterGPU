@@ -500,7 +500,10 @@ export class RibbonsController {
 
                 pass.setBindGroup(1, fsUniformsBindGroup);
 
-                pass.draw(emitter.creationTimes.length * 2);
+                const vertexCount = Math.min(emitter.creationTimes.length, emitter.capacity) * 2;
+                if (vertexCount > 0) {
+                    pass.draw(vertexCount);
+                }
             }
         }
     }
