@@ -62,6 +62,102 @@ function normalizeExportRel(p: string): string {
   return s.replace(/^\/+/, '');
 }
 
+function displayModelName(p: string): string {
+  const s = (p || '')
+    .trim()
+    .replace(/^mpq:auto:/i, '')
+    .replace(/^mpq:/i, '')
+    // Map MPQ source prefix (e.g. "1:foo.mdx")
+    .replace(/^\d+:/, '')
+    .replace(/\\/g, '/');
+  return s.split('/').pop() || s || p;
+}
+
+function isHiddenModelRel(rel: string): boolean {
+  return (rel || '').trim().toLowerCase().endsWith('.mdl');
+}
+
+function isVirtualMpqPath(abs: string): boolean {
+  const p = String(abs || '');
+  return p.startsWith('mpq:') || p.startsWith('mpq:auto:') || p.includes('mpq:');
+}
+
+function confirmDeleteFiles(absPaths: string[]): boolean {
+  const uniq = Array.from(new Set((absPaths || []).filter(Boolean)));
+  if (!uniq.length) return false;
+  const lines = uniq.slice().sort();
+  return window.confirm(`将删除以下文件：\n\n${lines.join('\n')}\n\n确定删除？`);
+}
+
+const WAR3_NATIVE_PREFIXES = [
+  'textures/', 'replaceabletextures/', 'abilities/', 'buildings/',
+  'doodads/', 'ui/', 'units/', 'environment/', 'splats/',
+];
+
+function isWar3NativePath(p: string): boolean {
+  const lower = (p || '').replace(/\\/g, '/').toLowerCase();
+  return WAR3_NATIVE_PREFIXES.some(prefix => lower.startsWith(prefix));
+}
+
+function normalizeRelForCopy(rel: string): string {
+  return String(rel || '')
+    .trim()
+    .replace(/^\d+:/, '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '');
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    const t = String(text ?? '');
+    // Prefer modern API
+    // @ts-ignore
+    if (navigator?.clipboard?.writeText) {
+      // @ts-ignore
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch {}
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = String(text ?? '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function uniqueName(base: string, used: Set<string>): string {
+  const raw = (base || '').trim() || 'tex';
+  const dot = raw.lastIndexOf('.');
+  const stem = dot >= 0 ? raw.slice(0, dot) : raw;
+  const ext = dot >= 0 ? raw.slice(dot) : '';
+  let out = `${stem}${ext}`;
+  let n = 1;
+  while (used.has(out.toLowerCase())) {
+    out = `${stem}_${n}${ext}`;
+    n++;
+  }
+  used.add(out.toLowerCase());
+  return out;
+}
+
+function relDir(rel: string): string {
+  const n = (rel || '').replace(/\\/g, '/');
+  const i = n.lastIndexOf('/');
+  if (i <= 0) return '';
+  return n.slice(0, i);
+}
+
 function baseName(p: string): string {
   const n = (p || '').replace(/\\/g, '/');
   const parts = n.split('/');
@@ -199,12 +295,15 @@ class ModelTile {
   public readonly canvas: HTMLCanvasElement;
   public readonly labelEl: HTMLSpanElement;
   public readonly badgeEl: HTMLSpanElement;
+  public readonly warnEl: HTMLDivElement;
   public visible = false;
   public loaded = false;
   public loading = false;
 
   private renderer: ModelRenderer | null = null;
   private model: Model | null = null;
+  public modelRel: string | null = null;
+  private hasMissingTexture = false;
   private theta = 0;
   private cameraDistance = 600;
   private center = vec3.create();
@@ -221,6 +320,7 @@ class ModelTile {
 
   constructor(
     public readonly modelAbs: string,
+    modelRel: string,
     private readonly idx: FileIndex,
     private readonly gpu: GPUShared,
     private readonly readFile: (p: string) => Promise<Uint8Array>,
@@ -233,6 +333,12 @@ class ModelTile {
     this.canvas.className = 'canvas';
     this.el.appendChild(this.canvas);
 
+    this.warnEl = document.createElement('div');
+    this.warnEl.className = 'tile-warn';
+    this.warnEl.style.display = 'none';
+    this.warnEl.textContent = '缺失贴图';
+    this.el.appendChild(this.warnEl);
+
     const hint = document.createElement('div');
     hint.className = 'hint';
     hint.textContent = 'Loading...';
@@ -242,13 +348,19 @@ class ModelTile {
     footer.className = 'meta';
     this.labelEl = document.createElement('span');
     this.labelEl.className = 'name';
-    this.labelEl.textContent = modelAbs.split(/[\\/]/).pop() || modelAbs;
+    this.labelEl.textContent = displayModelName(modelAbs);
     this.badgeEl = document.createElement('span');
     this.badgeEl.className = 'badge';
     this.badgeEl.textContent = '…';
     footer.appendChild(this.labelEl);
     footer.appendChild(this.badgeEl);
     this.el.appendChild(footer);
+
+    this.modelRel = modelRel;
+  }
+
+  setRel(modelRel: string) {
+    this.modelRel = modelRel;
   }
 
   setSize(cssPx: number) {
@@ -263,6 +375,8 @@ class ModelTile {
     if (this.loaded || this.loading) return;
     this.loading = true;
     try {
+      this.hasMissingTexture = false;
+      this.warnEl.style.display = 'none';
       let model = getCachedModel(this.modelAbs);
       if (!model) {
         const bytes = await this.readFile(this.modelAbs);
@@ -312,6 +426,10 @@ class ModelTile {
 
       // Load textures (best-effort, missing textures will use internal empty texture).
       await this.loadTextures(model, renderer);
+
+      if (this.hasMissingTexture) {
+        this.warnEl.style.display = '';
+      }
 
       // Mark loaded & remove hint.
       const hint = this.el.querySelector('.hint');
@@ -390,20 +508,12 @@ class ModelTile {
 
     const modelDir = dirNameAbs(this.modelAbs);
 
-    const WAR3_NATIVE_PREFIXES = [
-      'textures/', 'replaceabletextures/', 'abilities/', 'buildings/',
-      'doodads/', 'ui/', 'units/', 'environment/', 'splats/',
-    ];
-    function isWar3NativePath(p: string): boolean {
-      const lower = (p || '').replace(/\\/g, '/').toLowerCase();
-      return WAR3_NATIVE_PREFIXES.some(prefix => lower.startsWith(prefix));
-    }
-
     for (const tex of model.Textures || []) {
       if (!tex?.Image) continue;
       const abs = resolveTextureAbs(tex.Image, this.modelAbs, this.idx);
       if (!abs) {
         console.warn('[tex-missing]', tex.Image, 'model', this.modelAbs);
+        this.hasMissingTexture = true;
         try { renderer.setTextureImageData(tex.Image, fallbackMipmaps()); } catch {}
         continue;
       }
@@ -434,6 +544,7 @@ class ModelTile {
           await loadTextureIntoRenderer(renderer, tex.Image, abs, data, support);
         } catch (err) {
           console.warn('[tex-read-fail]', tex.Image, 'abs', abs, err);
+          this.hasMissingTexture = true;
           try { renderer.setTextureImageData(tex.Image, fallbackMipmaps()); } catch {}
         }
       })());
@@ -525,6 +636,7 @@ class ModelTile {
 class SingleModelViewer {
   private overlay: HTMLDivElement;
   private canvas: HTMLCanvasElement;
+  private warnEl: HTMLDivElement;
   private titleEl: HTMLDivElement;
   private selAnim: HTMLSelectElement;
   private rngSpeed: HTMLInputElement;
@@ -534,11 +646,12 @@ class SingleModelViewer {
   private inpOutDir: HTMLInputElement;
   private btnPickOut: HTMLButtonElement;
   private inpExportName: HTMLInputElement;
-  private btnRename: HTMLButtonElement;
-  private chkRenameTextures: HTMLInputElement;
+  private exportHintEl: HTMLDivElement;
   private btnBack: HTMLButtonElement;
   private btnExport: HTMLButtonElement;
   private btnShot: HTMLButtonElement;
+  private btnDelModel: HTMLButtonElement;
+  private btnDelModelTex: HTMLButtonElement;
 
   private outDir: string | null = null;
 
@@ -549,6 +662,8 @@ class SingleModelViewer {
   private gpu: GPUShared | null = null;
   private raf = 0;
   private lastTime = 0;
+
+  private hasMissingTexture = false;
 
   // camera
   private center = vec3.create();
@@ -589,6 +704,9 @@ class SingleModelViewer {
 
   constructor(
     private readonly readFile: (p: string) => Promise<Uint8Array>,
+    private readonly getExportDir: () => string | null,
+    private readonly setExportDir: (dir: string | null) => void,
+    private readonly onDeleted?: (modelAbs: string) => void,
   ) {
     // build DOM
     this.overlay = document.createElement('div');
@@ -598,6 +716,7 @@ class SingleModelViewer {
         <div class="single-left">
           <div class="single-canvas-wrap">
             <canvas class="single-canvas" width="960" height="720"></canvas>
+            <div class="single-warn" style="display:none">缺失贴图</div>
             <div class="single-hint">左键：旋转  |  右键：平移  |  滚轮：缩放  |  双击：重置  |  ESC：关闭</div>
           </div>
         </div>
@@ -645,15 +764,15 @@ class SingleModelViewer {
 
             <div class="single-field">
               <label>导出文件名</label>
-              <div class="single-row">
-                <input class="field-input" id="singleExportName" placeholder="model" />
-                <button class="btn" id="singleRename">重命名</button>
-              </div>
-              <label class="single-check"><input id="singleRenameTextures" type="checkbox" /> 重命名贴图 (tex0/tex1...)</label>
+              <input class="field-input" id="singleExportName" placeholder="model" />
+              <div class="single-export-hint" id="singleExportHint" style="font-size:11px;color:#888;line-height:1.4;"></div>
             </div>
 
             <button class="btn" id="singleExport">导出模型与贴图</button>
             <button class="btn btn-ghost" id="singleShot">导出当前截图（PNG）</button>
+
+            <button class="btn btn-danger" id="singleDelModel">删除模型（仅模型）</button>
+            <button class="btn btn-danger" id="singleDelModelTex">删除模型（以及贴图）</button>
           </div>
         </div>
       </div>
@@ -661,6 +780,7 @@ class SingleModelViewer {
     document.body.appendChild(this.overlay);
 
     this.canvas = this.overlay.querySelector('canvas.single-canvas') as HTMLCanvasElement;
+    this.warnEl = this.overlay.querySelector('.single-warn') as HTMLDivElement;
     this.titleEl = this.overlay.querySelector('.single-title') as HTMLDivElement;
     this.selAnim = this.overlay.querySelector('#singleAnim') as HTMLSelectElement;
     this.rngSpeed = this.overlay.querySelector('#singleSpeed') as HTMLInputElement;
@@ -670,11 +790,12 @@ class SingleModelViewer {
     this.inpOutDir = this.overlay.querySelector('#singleOutDir') as HTMLInputElement;
     this.btnPickOut = this.overlay.querySelector('#singlePickOut') as HTMLButtonElement;
     this.inpExportName = this.overlay.querySelector('#singleExportName') as HTMLInputElement;
-    this.btnRename = this.overlay.querySelector('#singleRename') as HTMLButtonElement;
-    this.chkRenameTextures = this.overlay.querySelector('#singleRenameTextures') as HTMLInputElement;
+    this.exportHintEl = this.overlay.querySelector('#singleExportHint') as HTMLDivElement;
     this.btnBack = this.overlay.querySelector('#singleBack') as HTMLButtonElement;
     this.btnExport = this.overlay.querySelector('#singleExport') as HTMLButtonElement;
     this.btnShot = this.overlay.querySelector('#singleShot') as HTMLButtonElement;
+    this.btnDelModel = this.overlay.querySelector('#singleDelModel') as HTMLButtonElement;
+    this.btnDelModelTex = this.overlay.querySelector('#singleDelModelTex') as HTMLButtonElement;
 
     // events
     this.btnBack.addEventListener('click', () => this.close());
@@ -685,6 +806,9 @@ class SingleModelViewer {
     // mouse orbit & pan
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     this.canvas.addEventListener('pointerdown', (e) => {
+      if (document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(document.activeElement.tagName)) {
+        return;
+      }
       this.dragging = true;
       this.dragButton = e.button;
       this.lastX = e.clientX;
@@ -710,6 +834,8 @@ class SingleModelViewer {
     });
     this.canvas.addEventListener('pointerup', () => { this.dragging = false; });
     this.canvas.addEventListener('pointercancel', () => { this.dragging = false; });
+    this.canvas.addEventListener('lostpointercapture', () => { this.dragging = false; });
+    window.addEventListener('blur', () => { this.dragging = false; });
     this.canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       const k = Math.exp(e.deltaY * 0.001);
@@ -774,55 +900,52 @@ class SingleModelViewer {
       if (!out) return;
       this.outDir = out;
       this.inpOutDir.value = out;
+      try { this.setExportDir(out); } catch {}
     });
 
-    this.btnRename.addEventListener('click', () => {
-      this.inpExportName.value = (this.inpExportName.value || '').trim();
-    });
+    this.inpExportName.addEventListener('input', () => this.updateExportHint());
 
     this.btnExport.addEventListener('click', async () => {
       if (!window.war3Desktop || !this.model || !this.idx || !this.modelAbs) return;
-      const out = this.outDir || await window.war3Desktop.selectExportFolder();
+      let out = this.outDir || this.getExportDir();
+      if (!out) out = await window.war3Desktop.selectExportFolder();
       if (!out) return;
       this.outDir = out;
       this.inpOutDir.value = out;
+      try { this.setExportDir(out); } catch {}
 
       const exportName = (this.inpExportName.value || '').trim() || (this.modelAbs.split(/[\\/]/).pop() || 'model').replace(/\.[^.]+$/, '');
-      const renameTextures = Boolean(this.chkRenameTextures.checked);
+      const hasChinese = /[\u4e00-\u9fa5]/.test(exportName);
 
       const bytes = await this.readFile(this.modelAbs);
       const isMDX = this.modelAbs.toLowerCase().endsWith('.mdx') || isMDXBytes(bytes);
 
       const modelCopy: any = { ...this.model, Textures: (this.model.Textures || []).map(t => ({ ...t })) };
-      const textureExports: { abs: string; rel: string; texIndex: number }[] = [];
+      const textureExports: { abs: string; name: string; texIndex: number }[] = [];
+      const usedNames = new Set<string>();
 
       for (let i = 0; i < (this.model.Textures || []).length; i++) {
         const tex = this.model.Textures[i];
         if (!tex?.Image) continue;
+
+        if (isWar3NativePath(tex.Image)) {
+          continue;
+        }
         const abs = resolveTextureAbs(tex.Image, this.modelAbs, this.idx);
         if (!abs) continue;
 
-        let rel: string;
-        if (renameTextures) {
+        let name: string;
+        if (hasChinese) {
+          const base = baseName(normalizeExportRel(tex.Image) || tex.Image);
+          name = uniqueName(base || baseName(abs), usedNames);
+        } else {
           const srcBase = baseName(abs);
           const dot = srcBase.lastIndexOf('.');
           const ext = dot >= 0 ? srcBase.slice(dot) : '.blp';
-          rel = `tex/tex${i}${ext}`;
-          modelCopy.Textures[i].Image = rel;
-        } else {
-          rel = normalizeExportRel(tex.Image);
-          if (!rel) rel = baseName(tex.Image);
+          name = uniqueName(`${exportName}_tex${i}${ext}`, usedNames);
+          modelCopy.Textures[i].Image = name;
         }
-        textureExports.push({ abs, rel, texIndex: i });
-      }
-
-      if (!renameTextures) {
-        for (let i = 0; i < (modelCopy.Textures || []).length; i++) {
-          const img = modelCopy.Textures[i]?.Image;
-          if (typeof img === 'string') {
-            modelCopy.Textures[i].Image = normalizeExportRel(img);
-          }
-        }
+        textureExports.push({ abs, name, texIndex: i });
       }
 
       const modelExt = isMDX ? '.mdx' : '.mdl';
@@ -838,25 +961,106 @@ class SingleModelViewer {
       for (const te of textureExports) {
         try {
           const data = await this.readFile(te.abs);
-          await window.war3Desktop.writeFile(`${out}/${te.rel}`, data);
+          await window.war3Desktop.writeFile(`${out}/${te.name}`, data);
         } catch {
         }
       }
+
+      alert('导出成功。');
     });
 
     this.btnShot.addEventListener('click', async () => {
       if (!window.war3Desktop) return;
-      const out = await window.war3Desktop.selectExportFolder();
+      let out = this.outDir || this.getExportDir();
+      if (!out) out = await window.war3Desktop.selectExportFolder();
       if (!out) return;
+      this.outDir = out;
+      this.inpOutDir.value = out;
+      try { this.setExportDir(out); } catch {}
       const blob = await new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve));
       if (!blob) return;
       const buf = new Uint8Array(await blob.arrayBuffer());
       const name = (this.modelAbs?.split(/[\\/]/).pop() || 'shot').replace(/\.(mdx|mdl)$/i, '');
       const file = `${out.replace(/\\/g, '/')}/${name}.png`;
       await window.war3Desktop.writeFile(file, buf);
+      alert('导出成功。');
+    });
+
+    this.btnDelModel.addEventListener('click', async () => {
+      await this.deleteCurrent(false);
+    });
+    this.btnDelModelTex.addEventListener('click', async () => {
+      await this.deleteCurrent(true);
     });
 
     this.overlay.style.display = 'none';
+  }
+
+  private async deleteCurrent(withTextures: boolean) {
+    if (!window.war3Desktop || !this.idx || !this.modelAbs) return;
+    if (isVirtualMpqPath(this.modelAbs)) {
+      alert('MPQ 内资源无法删除（只能删除本地文件）。');
+      return;
+    }
+
+    const toDelete: string[] = [this.modelAbs];
+    if (withTextures && this.model) {
+      const modelDir = dirNameAbs(this.modelAbs);
+      for (const tex of this.model.Textures || []) {
+        if (!tex?.Image) continue;
+        if (isWar3NativePath(tex.Image)) continue;
+        const abs = resolveTextureAbs(tex.Image, this.modelAbs, this.idx);
+        if (!abs) continue;
+        if (isVirtualMpqPath(abs)) continue;
+        if (dirNameAbs(abs) === modelDir) {
+          toDelete.push(abs);
+        }
+      }
+    }
+
+    if (!confirmDeleteFiles(toDelete)) return;
+    const ok = await window.war3Desktop.deleteFiles(toDelete);
+    if (!ok) {
+      alert('删除失败（可能是 MPQ 资源或权限不足）。');
+      return;
+    }
+    try { this.onDeleted?.(this.modelAbs); } catch {}
+    this.close();
+  }
+
+  public setExternalExportDir(dir: string | null) {
+    this.outDir = dir;
+    try {
+      if (this.overlay.style.display !== 'none') {
+        this.inpOutDir.value = dir || '';
+      }
+    } catch {
+    }
+  }
+
+  private updateExportHint() {
+    if (!this.exportHintEl || !this.model) return;
+    const exportName = (this.inpExportName.value || '').trim() || 'model';
+    const hasChinese = /[\u4e00-\u9fa5]/.test(exportName);
+    const isMDX = this.modelAbs?.toLowerCase().endsWith('.mdx');
+    const ext = isMDX ? '.mdx' : '.mdl';
+
+    const texCount = (this.model.Textures || []).filter(t => t?.Image && !isWar3NativePath(t.Image)).length;
+    let texHint = '';
+    if (texCount > 0) {
+      if (hasChinese) {
+        texHint = `（贴图保持原名，共 ${texCount} 张）`;
+      } else {
+        const names = [];
+        for (let i = 0; i < Math.min(texCount, 3); i++) {
+          names.push(`${exportName}_tex${i}.blp`);
+        }
+        if (texCount > 3) names.push('...');
+        texHint = `+ ${names.join(' + ')}`;
+      }
+    }
+
+    this.exportHintEl.innerHTML = `将导出：<b>${exportName}${ext}</b> ${texHint}<br><span style="color:#666;">（保持原扩展名，内部 path 也改成纯文件名）</span>`;
   }
 
   private computeCamera(model: Model) {
@@ -928,9 +1132,11 @@ class SingleModelViewer {
     this.idx = idx;
     this.gpu = gpu;
     this.overlay.style.display = 'block';
-    this.titleEl.textContent = modelAbs;
-    this.outDir = null;
-    this.inpOutDir.value = '';
+    this.titleEl.textContent = displayModelName(modelAbs);
+    this.hasMissingTexture = false;
+    if (this.warnEl) this.warnEl.style.display = 'none';
+    this.outDir = this.getExportDir();
+    this.inpOutDir.value = this.outDir || '';
 
     try {
       const bytes = await this.readFile(modelAbs);
@@ -947,8 +1153,9 @@ class SingleModelViewer {
       this.model = model;
       this.computeCamera(model);
 
-      const base = modelAbs.split(/[\\/]/).pop() || modelAbs;
+      const base = displayModelName(modelAbs);
       this.inpExportName.value = base.replace(/\.[^.]+$/, '');
+      this.updateExportHint();
 
       // anim list
       this.selAnim.innerHTML = '';
@@ -995,6 +1202,9 @@ class SingleModelViewer {
         }
       } catch {}
       await this.loadTextures(model, renderer, idx);
+      if (this.hasMissingTexture && this.warnEl) {
+        this.warnEl.style.display = '';
+      }
       this.renderer = renderer;
 
       // apply initial bg alpha
@@ -1011,11 +1221,13 @@ class SingleModelViewer {
   private async loadTextures(model: Model, renderer: ModelRenderer, idx: FileIndex) {
     const support = { hasGPUBC: (this.gpu?.hasGPUBC ?? false) };
     const promises: Promise<void>[] = [];
+    this.hasMissingTexture = false;
     for (const tex of model.Textures || []) {
       if (!tex?.Image) continue;
       const abs = resolveTextureAbs(tex.Image, this.modelAbs!, idx);
         if (!abs) {
           console.warn('[tex-missing]', tex.Image, 'model', this.modelAbs);
+          this.hasMissingTexture = true;
           continue;
         }
       promises.push((async () => {
@@ -1024,6 +1236,7 @@ class SingleModelViewer {
           await loadTextureIntoRenderer(renderer, tex.Image, abs, data, support);
         } catch (err) {
           console.warn('[tex-read-fail]', tex.Image, 'abs', abs, err);
+          this.hasMissingTexture = true;
           // Avoid cascading failures: bind a 1x1 transparent texture as fallback.
           try { renderer.setTextureImageData(tex.Image, fallbackMipmaps()); } catch {}
         }
@@ -1098,20 +1311,24 @@ export class BatchViewer {
   private folder: FolderData | null = null;
   private idx: FileIndex | null = null;
   private gpu: GPUShared | null = null;
-
+  private observer: IntersectionObserver;
   private tiles: ModelTile[] = [];
   private tilePool = new Map<string, ModelTile>();
   private tileMap = new Map<HTMLDivElement, ModelTile>();
-  private observer: IntersectionObserver;
-  private loadingQueue: ModelTile[] = [];
-  private loadingCount = 0;
-  private singleViewer: SingleModelViewer;
-
   private lastFiltered: string[] = [];
+
+  private isMapMode = false;
   private lastPageList: string[] = [];
   private lastPages = 1;
   private lastPage = 0;
   private lastPageSize = 1;
+
+  private loadingQueue: ModelTile[] = [];
+  private loadingCount = 0;
+
+  private singleViewer: SingleModelViewer;
+  private readonly getExportDir: () => string | null;
+  private readonly setExportDir: (dir: string | null) => void;
 
   private prefetchGen = 0;
   private prefetching = false;
@@ -1153,8 +1370,14 @@ export class BatchViewer {
     private readonly statusEl: HTMLElement,
     private readonly readFile: (p: string) => Promise<Uint8Array>,
     private readonly getSettings: () => ViewerSettings,
+    getExportDir: () => string | null,
+    setExportDir: (dir: string | null) => void,
   ) {
-    this.singleViewer = new SingleModelViewer(this.readFile);
+    this.getExportDir = getExportDir;
+    this.setExportDir = setExportDir;
+    this.singleViewer = new SingleModelViewer(this.readFile, this.getExportDir, this.setExportDir, (modelAbs) => {
+      this.onExternalModelDeleted(modelAbs);
+    });
 
     // Single click a tile to open the single-model viewer.
     this.grid.addEventListener('click', (ev) => {
@@ -1169,6 +1392,18 @@ export class BatchViewer {
       this.singleViewer.open(tile.modelAbs, this.idx, this.gpu);
     });
 
+    this.grid.addEventListener('contextmenu', (ev) => {
+      const e = ev as unknown as MouseEvent;
+      const target = e.target as HTMLElement | null;
+      const tileEl = target?.closest?.('.tile') as HTMLDivElement | null;
+      if (!tileEl) return;
+      const tile = this.tileMap.get(tileEl);
+      if (!tile) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.openContextMenu(tile, e.clientX, e.clientY);
+    });
+
     this.observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
         const tile = this.tileMap.get(e.target as HTMLDivElement);
@@ -1181,6 +1416,320 @@ export class BatchViewer {
     }, { root: null, threshold: 0.05 });
 
     requestAnimationFrame(this.loop);
+  }
+
+  private ctxMenuEl: HTMLDivElement | null = null;
+  private ctxMenuCurrent: ModelTile | null = null;
+  private ctxItemDelModel: HTMLDivElement | null = null;
+  private ctxItemDelModelTex: HTMLDivElement | null = null;
+  private ctxItemViewTextures: HTMLDivElement | null = null;
+
+  private emitModelsChanged(deletedRels: string[]) {
+    try {
+      window.dispatchEvent(new CustomEvent('war3:modelsChanged', { detail: { deletedRels } }));
+    } catch {
+    }
+  }
+
+  private setCtxItemDisabled(item: HTMLDivElement | null, disabled: boolean) {
+    if (!item) return;
+    item.dataset.disabled = disabled ? '1' : '';
+    item.style.cursor = disabled ? 'not-allowed' : 'pointer';
+    item.style.opacity = disabled ? '0.5' : '1';
+    item.style.pointerEvents = disabled ? 'none' : 'auto';
+  }
+
+  private ensureContextMenu() {
+    if (this.ctxMenuEl) return;
+    const el = document.createElement('div');
+    el.style.position = 'fixed';
+    el.style.zIndex = '99999';
+    el.style.minWidth = '260px';
+    el.style.padding = '10px';
+    el.style.borderRadius = '14px';
+    el.style.background = 'rgba(24, 24, 24, 0.92)';
+    el.style.border = '1px solid rgba(255,255,255,0.10)';
+    el.style.backdropFilter = 'blur(12px)';
+    el.style.color = '#eee';
+    el.style.display = 'none';
+    el.style.userSelect = 'none';
+
+    const makeItem = (label: string, onClick?: (tile: ModelTile) => void, disabled?: boolean) => {
+      const item = document.createElement('div');
+      item.textContent = label;
+      item.style.padding = '10px 12px';
+      item.style.borderRadius = '10px';
+      item.dataset.disabled = disabled ? '1' : '';
+      item.style.cursor = disabled ? 'not-allowed' : 'pointer';
+      item.style.opacity = disabled ? '0.5' : '1';
+      item.addEventListener('mouseenter', () => {
+        if (item.dataset.disabled === '1') return;
+        item.style.background = 'rgba(255,255,255,0.08)';
+      });
+      item.addEventListener('mouseleave', () => {
+        item.style.background = 'transparent';
+      });
+      item.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (item.dataset.disabled === '1') return;
+        const tile = this.ctxMenuCurrent;
+        this.hideContextMenu();
+        if (!tile) return;
+        try { onClick?.(tile); } catch {}
+      });
+      el.appendChild(item);
+      return item;
+    };
+
+    makeItem('当前模型：', undefined, true);
+    makeItem('复制相对路径', (tile) => this.ctxCopyRel(tile));
+    makeItem('复制绝对路径', (tile) => this.ctxCopyAbs(tile));
+    makeItem('导出模型', (tile) => this.ctxExport(tile));
+    this.ctxItemDelModel = makeItem('删除模型（仅模型）', (tile) => this.ctxDelete(tile, false)) || null;
+    this.ctxItemDelModelTex = makeItem('删除模型（以及贴图）', (tile) => this.ctxDelete(tile, true)) || null;
+    this.ctxItemViewTextures = makeItem('查看模型贴图', (tile) => this.ctxViewTextures(tile)) || null;
+
+    document.body.appendChild(el);
+    this.ctxMenuEl = el;
+
+    window.addEventListener('mousedown', (e) => {
+      if (!this.ctxMenuEl) return;
+      const target = e.target as HTMLElement | null;
+      if (target && this.ctxMenuEl.contains(target)) return;
+      this.hideContextMenu();
+    });
+    window.addEventListener('keydown', (ev) => {
+      if ((ev as KeyboardEvent).key === 'Escape') this.hideContextMenu();
+    });
+    window.addEventListener('scroll', () => this.hideContextMenu(), { passive: true });
+  }
+
+  private openContextMenu(tile: ModelTile, x: number, y: number) {
+    this.ensureContextMenu();
+    if (!this.ctxMenuEl) return;
+    this.ctxMenuCurrent = tile;
+
+    const disableDanger = this.isMapMode;
+    this.setCtxItemDisabled(this.ctxItemDelModel, disableDanger);
+    this.setCtxItemDisabled(this.ctxItemDelModelTex, disableDanger);
+    this.setCtxItemDisabled(this.ctxItemViewTextures, disableDanger);
+
+    const title = this.ctxMenuEl.firstChild as HTMLElement | null;
+    if (title) {
+      title.textContent = `当前模型： ${displayModelName(tile.modelAbs)}`;
+    }
+
+    this.ctxMenuEl.style.display = 'block';
+    const pad = 8;
+    const rect = this.ctxMenuEl.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - pad;
+    const maxY = window.innerHeight - rect.height - pad;
+    this.ctxMenuEl.style.left = `${Math.max(pad, Math.min(x, maxX))}px`;
+    this.ctxMenuEl.style.top = `${Math.max(pad, Math.min(y, maxY))}px`;
+  }
+
+  private hideContextMenu() {
+    if (this.ctxMenuEl) this.ctxMenuEl.style.display = 'none';
+    this.ctxMenuCurrent = null;
+  }
+
+  private ctxCopyRel(tile: ModelTile) {
+    const rel = normalizeRelForCopy(tile.modelRel || displayModelName(tile.modelAbs));
+    copyText(rel);
+  }
+
+  private ctxCopyAbs(tile: ModelTile) {
+    copyText(tile.modelAbs);
+  }
+
+  private async parseModelFromAbs(modelAbs: string): Promise<{ model: Model; isMDX: boolean; bytes: Uint8Array } | null> {
+    try {
+      const bytes = await this.readFile(modelAbs);
+      const lower = modelAbs.toLowerCase();
+      const isMDX = lower.endsWith('.mdx') || isMDXBytes(bytes);
+      const array = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      let model: Model;
+      if (isMDX) model = parseMDX(array);
+      else {
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        model = parseMDL(text);
+      }
+      ensureModelHasSequence(model);
+      return { model, isMDX, bytes };
+    } catch {
+      return null;
+    }
+  }
+
+  private async ctxExport(tile: ModelTile) {
+    if (!this.idx) return;
+    if (!window.war3Desktop) return;
+    let out = this.getExportDir();
+    if (!out) out = await window.war3Desktop.selectExportFolder();
+    if (!out) return;
+    try { this.setExportDir(out); } catch {}
+
+    const parsed = await this.parseModelFromAbs(tile.modelAbs);
+    if (!parsed) return;
+
+    const used = new Set<string>();
+    const modelCopy: any = { ...parsed.model, Textures: (parsed.model.Textures || []).map(tt => ({ ...tt })) };
+    const texWrites: { abs: string; name: string }[] = [];
+
+    for (let i = 0; i < (parsed.model.Textures || []).length; i++) {
+      const tex = parsed.model.Textures[i];
+      if (!tex?.Image) continue;
+      if (isWar3NativePath(tex.Image)) continue;
+      const abs = resolveTextureAbs(tex.Image, tile.modelAbs, this.idx);
+      if (!abs) continue;
+      const base = baseName(normalizeExportRel(tex.Image) || tex.Image) || baseName(abs);
+      const name = uniqueName(base, used);
+      modelCopy.Textures[i].Image = name;
+      texWrites.push({ abs, name });
+    }
+
+    const baseModel = displayModelName(tile.modelAbs).replace(/\.(mdx|mdl)$/i, '');
+    const modelFile = `${out.replace(/\\/g, '/')}/${baseModel}${parsed.isMDX ? '.mdx' : '.mdl'}`;
+    if (parsed.isMDX) {
+      const outBuf = generateMDX(modelCopy as Model);
+      await window.war3Desktop.writeFile(modelFile, new Uint8Array(outBuf));
+    } else {
+      const outText = generateMDL(modelCopy as Model);
+      await window.war3Desktop.writeFile(modelFile, new TextEncoder().encode(outText));
+    }
+
+    for (const tw of texWrites) {
+      try {
+        const data = await this.readFile(tw.abs);
+        await window.war3Desktop.writeFile(`${out.replace(/\\/g, '/')}/${tw.name}`, data);
+      } catch {
+      }
+    }
+
+    alert('导出成功。');
+  }
+
+  public setExternalExportDir(dir: string | null) {
+    try {
+      this.singleViewer.setExternalExportDir(dir);
+    } catch {
+    }
+  }
+
+  private async ctxViewTextures(tile: ModelTile) {
+    if (!this.idx) return;
+    const parsed = await this.parseModelFromAbs(tile.modelAbs);
+    if (!parsed) return;
+    const lines: string[] = [];
+    for (const tex of parsed.model.Textures || []) {
+      if (!tex?.Image) continue;
+      const native = isWar3NativePath(tex.Image);
+      const abs = resolveTextureAbs(tex.Image, tile.modelAbs, this.idx);
+      lines.push(`${native ? '[原生]' : '[导出]'} ${tex.Image}  ->  ${abs || '(missing)'}`);
+    }
+    alert(lines.join('\n'));
+  }
+
+  private async ctxDelete(tile: ModelTile, withTextures: boolean) {
+    if (!this.idx || !window.war3Desktop) return;
+    if (isVirtualMpqPath(tile.modelAbs)) {
+      alert('MPQ 内资源无法删除（只能删除本地文件）。');
+      return;
+    }
+
+    const toDelete: string[] = [tile.modelAbs];
+    if (withTextures) {
+      const parsed = await this.parseModelFromAbs(tile.modelAbs);
+      if (parsed) {
+        const modelDir = dirNameAbs(tile.modelAbs);
+        for (const tex of parsed.model.Textures || []) {
+          if (!tex?.Image) continue;
+          if (isWar3NativePath(tex.Image)) continue;
+          const abs = resolveTextureAbs(tex.Image, tile.modelAbs, this.idx);
+          if (!abs) continue;
+          if (isVirtualMpqPath(abs)) continue;
+          if (dirNameAbs(abs) === modelDir) {
+            toDelete.push(abs);
+          }
+        }
+      }
+    }
+
+    if (!confirmDeleteFiles(toDelete)) return;
+
+    const ok = await window.war3Desktop.deleteFiles(toDelete);
+    if (!ok) {
+      alert('删除失败（可能是 MPQ 资源或权限不足）。');
+      return;
+    }
+
+    if (this.folder && tile.modelRel) {
+      const rel = tile.modelRel;
+      this.folder.models = this.folder.models.filter((m) => m !== rel);
+      this.renderTiles();
+      this.emitModelsChanged([rel]);
+    }
+  }
+
+  public async deleteModels(modelRels: string[], withTextures: boolean): Promise<boolean> {
+    if (!this.idx || !this.folder || !window.war3Desktop) return false;
+    const uniq = Array.from(new Set((modelRels || []).filter(Boolean)));
+    const toDeleteAbs: string[] = [];
+    const deletedRels: string[] = [];
+
+    for (const rel of uniq) {
+      const abs = this.resolveModelAbs(rel);
+      if (!abs) continue;
+      if (isVirtualMpqPath(abs)) continue;
+      deletedRels.push(rel);
+      toDeleteAbs.push(abs);
+
+      if (withTextures) {
+        const parsed = await this.parseModelFromAbs(abs);
+        if (parsed) {
+          const modelDir = dirNameAbs(abs);
+          for (const tex of parsed.model.Textures || []) {
+            if (!tex?.Image) continue;
+            if (isWar3NativePath(tex.Image)) continue;
+            const texAbs = resolveTextureAbs(tex.Image, abs, this.idx);
+            if (!texAbs) continue;
+            if (isVirtualMpqPath(texAbs)) continue;
+            if (dirNameAbs(texAbs) === modelDir) {
+              toDeleteAbs.push(texAbs);
+            }
+          }
+        }
+      }
+    }
+
+    const uniqAbs = Array.from(new Set(toDeleteAbs));
+    if (!uniqAbs.length) return false;
+    if (!confirmDeleteFiles(uniqAbs)) return false;
+
+    const ok = await window.war3Desktop.deleteFiles(uniqAbs);
+    if (!ok) {
+      alert('删除失败（可能是 MPQ 资源或权限不足）。');
+      return false;
+    }
+
+    this.folder.models = this.folder.models.filter((m) => !deletedRels.includes(m));
+    this.renderTiles();
+    this.emitModelsChanged(deletedRels);
+    return true;
+  }
+
+  private onExternalModelDeleted(modelAbs: string) {
+    if (!this.folder || !this.idx) return;
+    const absLower = (modelAbs || '').replace(/\\/g, '/').toLowerCase();
+    const rel = this.folder.models.find((m) => {
+      const a = this.idx?.byRelLower.get(m.replace(/\\/g, '/').toLowerCase());
+      return (a || '').replace(/\\/g, '/').toLowerCase() === absLower;
+    });
+    if (!rel) return;
+    this.folder.models = this.folder.models.filter((m) => m !== rel);
+    this.renderTiles();
+    this.emitModelsChanged([rel]);
   }
 
   private lastLoopTime = 0;
@@ -1204,7 +1753,12 @@ export class BatchViewer {
   }
 
   async setFolder(folder: FolderData) {
-    this.folder = folder;
+    this.folder = {
+      ...folder,
+      models: (folder.models || []).filter((m) => !isHiddenModelRel(m)),
+    };
+
+    this.isMapMode = typeof folder?.root === 'string' && folder.root.startsWith('mpq:');
 
     if (!this.gpu) {
       this.status('初始化 WebGPU...');
@@ -1263,7 +1817,7 @@ export class BatchViewer {
           continue;
         }
 
-        const tile = new ModelTile(modelAbs, this.idx!, this.gpu!, this.readFile, this.getSettings);
+        const tile = new ModelTile(modelAbs, rel, this.idx!, this.gpu!, this.readFile, this.getSettings);
         tile.setSize(s.tileSize);
 
         try {
@@ -1303,31 +1857,53 @@ export class BatchViewer {
         const modelAbs = this.resolveModelAbs(rel);
         if (!modelAbs) continue;
 
-        // Write model bytes as-is to out/<rel>
         const modelBytes = await this.readFile(modelAbs);
-        const dstModel = `${outRoot.replace(/\\/g, '/')}/${rel.replace(/\\/g, '/')}`;
-        await window.war3Desktop.writeFile(dstModel, modelBytes);
-
-        // Parse model to enumerate referenced textures.
         const lower = modelAbs.toLowerCase();
-        let model: Model;
+        const isMDX = lower.endsWith('.mdx') || isMDXBytes(modelBytes);
         const array = modelBytes.buffer.slice(modelBytes.byteOffset, modelBytes.byteOffset + modelBytes.byteLength);
-        if (lower.endsWith('.mdx') || isMDXBytes(modelBytes)) {
+        let model: Model;
+        if (isMDX) {
           model = parseMDX(array);
         } else {
           const text = new TextDecoder('utf-8', { fatal: false }).decode(modelBytes);
           model = parseMDL(text);
         }
 
-        for (const tex of model.Textures || []) {
+        const modelCopy: any = { ...model, Textures: (model.Textures || []).map(t => ({ ...t })) };
+        const used = new Set<string>();
+        const texWrites: { abs: string; dst: string }[] = [];
+
+        const relNorm = rel.replace(/\\/g, '/');
+        const outDirRel = relDir(relNorm);
+        const outDirAbs = outDirRel ? `${outRoot.replace(/\\/g, '/')}/${outDirRel}` : outRoot.replace(/\\/g, '/');
+
+        for (let i = 0; i < (model.Textures || []).length; i++) {
+          const tex = model.Textures[i];
           if (!tex?.Image) continue;
+          if (isWar3NativePath(tex.Image)) continue;
           const abs = resolveTextureAbs(tex.Image, modelAbs, this.idx);
           if (!abs) continue;
+          const base = baseName(normalizeExportRel(tex.Image) || tex.Image) || baseName(abs);
+          const name = uniqueName(base, used);
+          modelCopy.Textures[i].Image = name;
+          texWrites.push({ abs, dst: `${outDirAbs}/${name}` });
+        }
 
-          const texBytes = await this.readFile(abs);
-          const relTex = normalizeExportRel(tex.Image) || baseName(tex.Image);
-          const dstTex = `${outRoot.replace(/\\/g, '/')}/${relTex}`;
-          await window.war3Desktop.writeFile(dstTex, texBytes);
+        const dstModel = `${outRoot.replace(/\\/g, '/')}/${relNorm}`;
+        if (isMDX) {
+          const outBuf = generateMDX(modelCopy as Model);
+          await window.war3Desktop.writeFile(dstModel, new Uint8Array(outBuf));
+        } else {
+          const outText = generateMDL(modelCopy as Model);
+          await window.war3Desktop.writeFile(dstModel, new TextEncoder().encode(outText));
+        }
+
+        for (const tw of texWrites) {
+          try {
+            const texBytes = await this.readFile(tw.abs);
+            await window.war3Desktop.writeFile(tw.dst, texBytes);
+          } catch {
+          }
         }
       }
       return true;
@@ -1443,7 +2019,6 @@ export class BatchViewer {
 
     this.grid.style.setProperty('--tile', `${s.tileSize}px`);
 
-    // Clean old
     try { this.observer.disconnect(); } catch {}
     this.grid.innerHTML = '';
     this.tiles = [];
@@ -1451,7 +2026,6 @@ export class BatchViewer {
     this.loadingQueue = [];
     this.loadingCount = 0;
 
-    // Re-create observer after disconnect to avoid leaking observations
     this.observer = new IntersectionObserver((entries) => {
       for (const e of entries) {
         const tile = this.tileMap.get(e.target as HTMLDivElement);
@@ -1465,14 +2039,15 @@ export class BatchViewer {
 
     const keepAbs = new Set<string>();
     for (const modelRel of list) {
-      // 从 idx 中获取绝对路径
       const modelAbs = this.resolveModelAbs(modelRel);
       if (!modelAbs) continue;
       keepAbs.add(modelAbs);
       let tile = this.tilePoolGet(modelAbs);
       if (!tile) {
-        tile = new ModelTile(modelAbs, idx, gpu, this.readFile, this.getSettings);
+        tile = new ModelTile(modelAbs, modelRel, idx, gpu, this.readFile, this.getSettings);
         this.tilePoolSet(modelAbs, tile);
+      } else {
+        tile.setRel(modelRel);
       }
       tile.setSize(s.tileSize);
       this.tiles.push(tile);

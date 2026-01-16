@@ -10,4 +10,5 @@ contextBridge.exposeInMainWorld("war3Desktop", {
   selectExportFolder: () => ipcRenderer.invoke("select-export-folder"),
   exportFiles: (outRoot, items) => ipcRenderer.invoke("fs:exportFiles", outRoot, items),
   writeFile: (absPath, data) => ipcRenderer.invoke("fs:writeFile", absPath, data),
+  deleteFiles: (absPaths) => ipcRenderer.invoke("fs:deleteFiles", absPaths),
 });

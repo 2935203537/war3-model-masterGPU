@@ -96,10 +96,33 @@ const readFile = async (abs: string): Promise<Uint8Array> => {
   return bytes;
 };
 
-const viewer = new BatchViewer(grid, statusEl, readFile, getSettings);
-
 let exportOutDir: string | null = null;
+let viewer: BatchViewer;
+
+function getExportOutDir(): string | null {
+  return exportOutDir;
+}
+
+function setExportOutDir(dir: string | null): void {
+  exportOutDir = dir;
+  txtOutDir.textContent = dir || '未选择';
+  try {
+    viewer?.setExternalExportDir(dir);
+  } catch {
+  }
+}
+
+viewer = new BatchViewer(grid, statusEl, readFile, getSettings, getExportOutDir, setExportOutDir);
 const selected = new Set<string>();
+
+window.addEventListener('war3:modelsChanged', (ev) => {
+  const e = ev as CustomEvent<any>;
+  const deletedRels: string[] = Array.isArray(e?.detail?.deletedRels) ? e.detail.deletedRels : [];
+  if (deletedRels.length) {
+    for (const rel of deletedRels) selected.delete(rel);
+  }
+  refreshAll();
+});
 
 function renderPageInfo() {
   const info = viewer.getRenderInfo();
@@ -307,28 +330,35 @@ btnPickOut.addEventListener('click', async () => {
   if (!window.war3Desktop) return;
   const out = await window.war3Desktop.selectExportFolder();
   if (!out) return;
-  exportOutDir = out;
-  txtOutDir.textContent = out;
+  setExportOutDir(out);
 });
 
 btnExportSelected.addEventListener('click', async () => {
-  if (!exportOutDir) {
+  let out = exportOutDir;
+  if (!out) out = await window.war3Desktop.selectExportFolder();
+  if (!out) {
     statusEl.textContent = '请先选择导出目录';
     return;
   }
+  setExportOutDir(out);
   const items = Array.from(selected);
   statusEl.textContent = `导出选中: ${items.length}...`;
-  const ok = await viewer.exportModels(exportOutDir, items);
+  const ok = await viewer.exportModels(out, items);
   statusEl.textContent = ok ? `导出完成: ${items.length}` : '导出失败';
+  if (ok) alert('导出成功。');
 });
 
 btnExportAll.addEventListener('click', async () => {
-  if (!exportOutDir) {
-    statusEl.textContent = '请先选择导出目录';
+  const items = Array.from(selected);
+  if (!items.length) {
+    statusEl.textContent = '请先勾选要删除的模型';
     return;
   }
-  const items = viewer.getFilteredModelRels();
-  statusEl.textContent = `导出全部: ${items.length}...`;
-  const ok = await viewer.exportModels(exportOutDir, items);
-  statusEl.textContent = ok ? `导出完成: ${items.length}` : '导出失败';
+  statusEl.textContent = `删除: ${items.length}...`;
+  const ok = await viewer.deleteModels(items, true);
+  if (ok) {
+    for (const rel of items) selected.delete(rel);
+    refreshAll();
+  }
+  statusEl.textContent = ok ? `删除完成: ${items.length}` : '删除取消/失败';
 });

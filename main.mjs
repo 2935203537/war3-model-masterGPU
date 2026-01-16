@@ -1619,6 +1619,33 @@ ipcMain.handle("fs:exportFiles", async (_evt, outRoot, items) => {
   }
 });
 
+
+ipcMain.handle("fs:deleteFiles", async (_evt, absPaths) => {
+  try {
+    if (!Array.isArray(absPaths)) return false;
+
+    const uniq = Array.from(new Set(absPaths.filter((p) => typeof p === 'string' && p.length > 0)));
+    for (const p of uniq) {
+      if (p.startsWith('mpq:') || p.startsWith('mpq:auto:') || p.includes('mpq:')) {
+        return false;
+      }
+    }
+
+    for (const p of uniq) {
+      try {
+        const st = await statSafe(p);
+        if (!st) continue;
+        if (st.isDirectory()) continue;
+        await fs.promises.unlink(p);
+      } catch {
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 // --- IPC：写文件（二进制）---
 ipcMain.handle("fs:writeFile", async (_evt, absPath, data) => {
   try {
