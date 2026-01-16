@@ -18,6 +18,7 @@ declare global {
       setWar3Dir: (dir: string) => Promise<string>;
       getWar3Status: () => Promise<null | { dir: string; hasMpqs: boolean }>;
       selectExportFolder: () => Promise<string | null>;
+      getExportDir: () => Promise<string | null>;
       exportFiles: (outRoot: string, items: { src: string; rel: string }[]) => Promise<boolean>;
       writeFile: (absPath: string, data: Uint8Array) => Promise<boolean>;
       deleteFiles: (absPaths: string[]) => Promise<boolean>;

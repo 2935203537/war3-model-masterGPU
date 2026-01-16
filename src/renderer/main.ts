@@ -115,6 +115,16 @@ function setExportOutDir(dir: string | null): void {
 viewer = new BatchViewer(grid, statusEl, readFile, getSettings, getExportOutDir, setExportOutDir);
 const selected = new Set<string>();
 
+// 启动时加载缓存的导出目录
+(async () => {
+  if (window.war3Desktop) {
+    const savedDir = await window.war3Desktop.getExportDir();
+    if (savedDir) {
+      setExportOutDir(savedDir);
+    }
+  }
+})();
+
 window.addEventListener('war3:modelsChanged', (ev) => {
   const e = ev as CustomEvent<any>;
   const deletedRels: string[] = Array.isArray(e?.detail?.deletedRels) ? e.detail.deletedRels : [];

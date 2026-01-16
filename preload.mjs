@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("war3Desktop", {
   getWar3Dir: () => ipcRenderer.invoke("get-war3-dir"),
   getWar3Status: () => ipcRenderer.invoke("get-war3-status"),
   selectExportFolder: () => ipcRenderer.invoke("select-export-folder"),
+  getExportDir: () => ipcRenderer.invoke("get-export-dir"),
   exportFiles: (outRoot, items) => ipcRenderer.invoke("fs:exportFiles", outRoot, items),
   writeFile: (absPath, data) => ipcRenderer.invoke("fs:writeFile", absPath, data),
   deleteFiles: (absPaths) => ipcRenderer.invoke("fs:deleteFiles", absPaths),

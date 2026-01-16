@@ -31,6 +31,7 @@ let mainWindow = null;
 // Default directory provided by user. Can be overridden via IPC.
 const DEFAULT_WAR3_DIR = "E:\\Warcraft III Frozen Throne";
 let war3Dir = DEFAULT_WAR3_DIR;
+let exportDir = '';
 
 const mpqState = {
   nextId: 1,
@@ -525,6 +526,9 @@ function loadSettingsSafe() {
     if (json && typeof json.war3Dir === 'string' && json.war3Dir.length > 0) {
       war3Dir = json.war3Dir;
     }
+    if (json && typeof json.exportDir === 'string' && json.exportDir.length > 0) {
+      exportDir = json.exportDir;
+    }
   } catch {
     // ignore
   }
@@ -552,7 +556,7 @@ function saveSettingsSafe() {
   try {
     const p = getConfigPath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ war3Dir }, null, 2), 'utf8');
+    fs.writeFileSync(p, JSON.stringify({ war3Dir, exportDir }, null, 2), 'utf8');
   } catch {
     // ignore
   }
@@ -1577,9 +1581,17 @@ ipcMain.handle("select-export-folder", async () => {
   const res = await dialog.showOpenDialog({
     title: "Select export folder",
     properties: ["openDirectory", "createDirectory"],
+    defaultPath: exportDir || undefined,
   });
   if (res.canceled || !res.filePaths?.[0]) return null;
+  exportDir = res.filePaths[0];
+  saveSettingsSafe();
   return res.filePaths[0];
+});
+
+// --- IPC：获取缓存的导出目录 ---
+ipcMain.handle("get-export-dir", async () => {
+  return exportDir || null;
 });
 
 function safeRelPath(p) {
